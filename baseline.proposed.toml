@@ -10,8 +10,8 @@ adapter_preference = "NVIDIA GeForce RTX 3050 Ti Laptop GPU"
 
 [world]
 count = 1
-width = 256.0
-height = 256.0
+width = 512.0
+height = 512.0
 boundary = "wrap_both_axes"
 initial_population = 256
 slots_per_world = 512
@@ -21,6 +21,7 @@ patch_regeneration_per_second = 6.0
 patch_radius = 5.0
 
 [creature]
+# One spatial unit is one metre; size 1 means a full body length of 1 m.
 reference_energy = 100.0
 energy_capacity_at_size_one = 100.0
 base_maintenance_per_second = 0.6
@@ -36,7 +37,7 @@ maximum_age_seconds = 300.0
 # Motion, FOV and capability costs require calibration with scripted controls.
 
 [grid]
-# Independent grid dimensions; each cell is 25.6 x 25.6 in this preset.
+# Independent grid dimensions; each cell is 51.2 x 51.2 m in this preset.
 # For other rectangles, derive search radii from width/cells_x and height/cells_y.
 cells_x = 10
 cells_y = 10
