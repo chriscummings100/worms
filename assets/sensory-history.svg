@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000">
+<rect width="1600" height="1000" fill="#0B2027"/>
+<circle cx="40" cy="55" r="3" fill="#315253"/>
+<circle cx="1480" cy="84" r="3" fill="#315253"/>
+<circle cx="1554" cy="392" r="3" fill="#315253"/>
+<circle cx="31" cy="850" r="3" fill="#315253"/>
+<circle cx="1440" cy="940" r="3" fill="#315253"/>
+<circle cx="1510" cy="760" r="3" fill="#315253"/>
+<text x="52.00" y="51.22" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="700" fill="#A6FFCF">WORMS / PERCEPTION</text>
+<text x="52.00" y="110.97" font-family="Segoe UI, Arial, sans-serif" font-size="43" font-weight="700" fill="#ECF8F2">Fixed inputs, fading observation history</text>
+<text x="52.00" y="156.96" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="400" fill="#A5C2BD">A small feed-forward brain gets a short memory without a recurrent hidden state.</text>
+<rect x="52" y="207" width="459" height="584" rx="18" fill="#133038" stroke="#315253" stroke-width="2"/>
+<text x="79.00" y="252.91" font-family="Segoe UI, Arial, sans-serif" font-size="29" font-weight="700" fill="#ECF8F2">16 angular positions</text>
+<text x="79.00" y="293.17" font-family="Segoe UI, Arial, sans-serif" font-size="23" font-weight="400" fill="#A6FFCF">FOV masks visibility</text>
+<polygon points="280.13,526.99 278.74,619.98 274.17,619.85 269.62,619.57 265.07,619.16 260.54,618.61 256.03,617.92 251.54,617.10 247.08,616.14 242.65,615.05 238.25,613.82 233.89,612.46 229.58,610.98 225.31,609.36 259.61,522.91 261.25,523.53 262.91,524.11 264.58,524.63 266.27,525.10 267.97,525.52 269.68,525.89 271.41,526.20 273.14,526.47 274.88,526.68 276.63,526.83 278.38,526.94 280.13,526.99" fill="#203D44" stroke="#36545A" stroke-width="2"/>
+<polygon points="258.00,522.25 221.13,607.62 216.97,605.75 212.86,603.75 208.82,601.63 204.85,599.39 200.94,597.03 197.11,594.55 193.35,591.96 189.68,589.25 186.08,586.44 182.58,583.52 179.16,580.49 175.84,577.36 240.61,510.62 241.88,511.82 243.20,512.99 244.54,514.11 245.92,515.19 247.33,516.23 248.78,517.23 250.25,518.18 251.75,519.08 253.28,519.94 254.83,520.76 256.40,521.53 258.00,522.25" fill="#203D44" stroke="#36545A" stroke-width="2"/>
+<polygon points="239.38,509.39 172.64,574.16 169.51,570.84 166.48,567.42 163.56,563.92 160.75,560.32 158.04,556.65 155.45,552.89 152.97,549.06 150.61,545.15 148.37,541.18 146.25,537.14 144.25,533.03 142.38,528.87 227.75,492.00 228.47,493.60 229.24,495.17 230.06,496.72 230.92,498.25 231.82,499.75 232.77,501.22 233.77,502.67 234.81,504.08 235.89,505.46 237.01,506.80 238.18,508.12 239.38,509.39" fill="#203D44" stroke="#36545A" stroke-width="2"/>
+<polygon points="227.09,490.39 140.64,524.69 139.02,520.42 137.54,516.11 136.18,511.75 134.95,507.35 133.86,502.92 132.90,498.46 132.08,493.97 131.39,489.46 130.84,484.93 130.43,480.38 130.15,475.83 130.02,471.26 223.01,469.87 223.06,471.62 223.17,473.37 223.32,475.12 223.53,476.86 223.80,478.59 224.11,480.32 224.48,482.03 224.90,483.73 225.37,485.42 225.89,487.09 226.47,488.75 227.09,490.39" fill="#203D44" stroke="#36545A" stroke-width="2"/>
+<polygon points="223.01,468.13 130.02,466.74 130.15,462.17 130.43,457.62 130.84,453.07 131.39,448.54 132.08,444.03 132.90,439.54 133.86,435.08 134.95,430.65 136.18,426.25 137.54,421.89 139.02,417.58 140.64,413.31 227.09,447.61 226.47,449.25 225.89,450.91 225.37,452.58 224.90,454.27 224.48,455.97 224.11,457.68 223.80,459.41 223.53,461.14 223.32,462.88 223.17,464.63 223.06,466.38 223.01,468.13" fill="#508876" stroke="#A6FFCF" stroke-width="2"/>
+<polygon points="227.75,446.00 142.38,409.13 144.25,404.97 146.25,400.86 148.37,396.82 150.61,392.85 152.97,388.94 155.45,385.11 158.04,381.35 160.75,377.68 163.56,374.08 166.48,370.58 169.51,367.16 172.64,363.84 239.38,428.61 238.18,429.88 237.01,431.20 235.89,432.54 234.81,433.92 233.77,435.33 232.77,436.78 231.82,438.25 230.92,439.75 230.06,441.28 229.24,442.83 228.47,444.40 227.75,446.00" fill="#508876" stroke="#A6FFCF" stroke-width="2"/>
+<polygon points="240.61,427.38 175.84,360.64 179.16,357.51 182.58,354.48 186.08,351.56 189.68,348.75 193.35,346.04 197.11,343.45 200.94,340.97 204.85,338.61 208.82,336.37 212.86,334.25 216.97,332.25 221.13,330.38 258.00,415.75 256.40,416.47 254.83,417.24 253.28,418.06 251.75,418.92 250.25,419.82 248.78,420.77 247.33,421.77 245.92,422.81 244.54,423.89 243.20,425.01 241.88,426.18 240.61,427.38" fill="#508876" stroke="#A6FFCF" stroke-width="2"/>
+<polygon points="259.61,415.09 225.31,328.64 229.58,327.02 233.89,325.54 238.25,324.18 242.65,322.95 247.08,321.86 251.54,320.90 256.03,320.08 260.54,319.39 265.07,318.84 269.62,318.43 274.17,318.15 278.74,318.02 280.13,411.01 278.38,411.06 276.63,411.17 274.88,411.32 273.14,411.53 271.41,411.80 269.68,412.11 267.97,412.48 266.27,412.90 264.58,413.37 262.91,413.89 261.25,414.47 259.61,415.09" fill="#508876" stroke="#A6FFCF" stroke-width="2"/>
+<polygon points="281.87,411.01 283.26,318.02 287.83,318.15 292.38,318.43 296.93,318.84 301.46,319.39 305.97,320.08 310.46,320.90 314.92,321.86 319.35,322.95 323.75,324.18 328.11,325.54 332.42,327.02 336.69,328.64 302.39,415.09 300.75,414.47 299.09,413.89 297.42,413.37 295.73,412.90 294.03,412.48 292.32,412.11 290.59,411.80 288.86,411.53 287.12,411.32 285.37,411.17 283.62,411.06 281.87,411.01" fill="#508876" stroke="#A6FFCF" stroke-width="2"/>
+<polygon points="304.00,415.75 340.87,330.38 345.03,332.25 349.14,334.25 353.18,336.37 357.15,338.61 361.06,340.97 364.89,343.45 368.65,346.04 372.32,348.75 375.92,351.56 379.42,354.48 382.84,357.51 386.16,360.64 321.39,427.38 320.12,426.18 318.80,425.01 317.46,423.89 316.08,422.81 314.67,421.77 313.22,420.77 311.75,419.82 310.25,418.92 308.72,418.06 307.17,417.24 305.60,416.47 304.00,415.75" fill="#508876" stroke="#A6FFCF" stroke-width="2"/>
+<polygon points="322.62,428.61 389.36,363.84 392.49,367.16 395.52,370.58 398.44,374.08 401.25,377.68 403.96,381.35 406.55,385.11 409.03,388.94 411.39,392.85 413.63,396.82 415.75,400.86 417.75,404.97 419.62,409.13 334.25,446.00 333.53,444.40 332.76,442.83 331.94,441.28 331.08,439.75 330.18,438.25 329.23,436.78 328.23,435.33 327.19,433.92 326.11,432.54 324.99,431.20 323.82,429.88 322.62,428.61" fill="#508876" stroke="#A6FFCF" stroke-width="2"/>
+<polygon points="334.91,447.61 421.36,413.31 422.98,417.58 424.46,421.89 425.82,426.25 427.05,430.65 428.14,435.08 429.10,439.54 429.92,444.03 430.61,448.54 431.16,453.07 431.57,457.62 431.85,462.17 431.98,466.74 338.99,468.13 338.94,466.38 338.83,464.63 338.68,462.88 338.47,461.14 338.20,459.41 337.89,457.68 337.52,455.97 337.10,454.27 336.63,452.58 336.11,450.91 335.53,449.25 334.91,447.61" fill="#508876" stroke="#A6FFCF" stroke-width="2"/>
+<polygon points="338.99,469.87 431.98,471.26 431.85,475.83 431.57,480.38 431.16,484.93 430.61,489.46 429.92,493.97 429.10,498.46 428.14,502.92 427.05,507.35 425.82,511.75 424.46,516.11 422.98,520.42 421.36,524.69 334.91,490.39 335.53,488.75 336.11,487.09 336.63,485.42 337.10,483.73 337.52,482.03 337.89,480.32 338.20,478.59 338.47,476.86 338.68,475.12 338.83,473.37 338.94,471.62 338.99,469.87" fill="#203D44" stroke="#36545A" stroke-width="2"/>
+<polygon points="334.25,492.00 419.62,528.87 417.75,533.03 415.75,537.14 413.63,541.18 411.39,545.15 409.03,549.06 406.55,552.89 403.96,556.65 401.25,560.32 398.44,563.92 395.52,567.42 392.49,570.84 389.36,574.16 322.62,509.39 323.82,508.12 324.99,506.80 326.11,505.46 327.19,504.08 328.23,502.67 329.23,501.22 330.18,499.75 331.08,498.25 331.94,496.72 332.76,495.17 333.53,493.60 334.25,492.00" fill="#203D44" stroke="#36545A" stroke-width="2"/>
+<polygon points="321.39,510.62 386.16,577.36 382.84,580.49 379.42,583.52 375.92,586.44 372.32,589.25 368.65,591.96 364.89,594.55 361.06,597.03 357.15,599.39 353.18,601.63 349.14,603.75 345.03,605.75 340.87,607.62 304.00,522.25 305.60,521.53 307.17,520.76 308.72,519.94 310.25,519.08 311.75,518.18 313.22,517.23 314.67,516.23 316.08,515.19 317.46,514.11 318.80,512.99 320.12,511.82 321.39,510.62" fill="#203D44" stroke="#36545A" stroke-width="2"/>
+<polygon points="302.39,522.91 336.69,609.36 332.42,610.98 328.11,612.46 323.75,613.82 319.35,615.05 314.92,616.14 310.46,617.10 305.97,617.92 301.46,618.61 296.93,619.16 292.38,619.57 287.83,619.85 283.26,619.98 281.87,526.99 283.62,526.94 285.37,526.83 287.12,526.68 288.86,526.47 290.59,526.20 292.32,525.89 294.03,525.52 295.73,525.10 297.42,524.63 299.09,524.11 300.75,523.53 302.39,522.91" fill="#203D44" stroke="#36545A" stroke-width="2"/>
+<circle cx="281" cy="469" r="37" fill="#A6FFCF"/>
+<circle cx="269" cy="457" r="5" fill="#0B2027"/>
+<circle cx="293" cy="457" r="5" fill="#0B2027"/>
+<polyline points="281,425 281,391" fill="none" stroke="#A6FFCF" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="281.00,391.00 285.79,399.78 276.21,399.78" fill="#A6FFCF"/>
+<text x="158.50" y="668.17" font-family="Segoe UI, Arial, sans-serif" font-size="23" font-weight="400" fill="#ECF8F2">4 values per angular bin</text>
+<text x="79.00" y="723.38" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="400" fill="#A5C2BD">Evolve the FOV angle.</text>
+<text x="79.00" y="756.38" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="400" fill="#A5C2BD">Keep the network shape fixed.</text>
+<rect x="543" y="207" width="1005" height="584" rx="18" fill="#133038" stroke="#315253" stroke-width="2"/>
+<text x="575.00" y="253.91" font-family="Segoe UI, Arial, sans-serif" font-size="29" font-weight="700" fill="#ECF8F2">A 128-value observation vector</text>
+<text x="575.00" y="336.96" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="700" fill="#A6FFCF">Current</text>
+<rect x="785" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="816" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="847" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="878" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="909" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="940" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="971" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="1002" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="1033" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="1064" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="1095" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="1126" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="1157" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="1188" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="1219" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<rect x="1250" y="313" width="25" height="40" rx="5" fill="#A6FFCF" stroke="#A6FFCF" stroke-width="2"/>
+<text x="1302.00" y="337.75" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" fill="#ECF8F2">× 4 = 64</text>
+<text x="785.00" y="378.01" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="400" fill="#A5C2BD">16 angular bins</text>
+<text x="575.00" y="437.96" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="700" fill="#8D9AF0">Fast fading</text>
+<rect x="785" y="414" width="25" height="40" rx="5" fill="#8D9AF0" stroke="#8D9AF0" stroke-width="2"/>
+<rect x="816" y="414" width="25" height="40" rx="5" fill="#8D9AF0" stroke="#8D9AF0" stroke-width="2"/>
+<rect x="847" y="414" width="25" height="40" rx="5" fill="#8D9AF0" stroke="#8D9AF0" stroke-width="2"/>
+<rect x="878" y="414" width="25" height="40" rx="5" fill="#8D9AF0" stroke="#8D9AF0" stroke-width="2"/>
+<rect x="909" y="414" width="25" height="40" rx="5" fill="#8D9AF0" stroke="#8D9AF0" stroke-width="2"/>
+<rect x="940" y="414" width="25" height="40" rx="5" fill="#8D9AF0" stroke="#8D9AF0" stroke-width="2"/>
+<rect x="971" y="414" width="25" height="40" rx="5" fill="#8D9AF0" stroke="#8D9AF0" stroke-width="2"/>
+<rect x="1002" y="414" width="25" height="40" rx="5" fill="#8D9AF0" stroke="#8D9AF0" stroke-width="2"/>
+<text x="1302.00" y="438.75" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" fill="#ECF8F2">× 4 = 32</text>
+<text x="785.00" y="479.01" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="400" fill="#A5C2BD">8 angular bins</text>
+<text x="575.00" y="538.96" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="700" fill="#E99363">Slow fading</text>
+<rect x="785" y="515" width="25" height="40" rx="5" fill="#E99363" stroke="#E99363" stroke-width="2"/>
+<rect x="816" y="515" width="25" height="40" rx="5" fill="#E99363" stroke="#E99363" stroke-width="2"/>
+<rect x="847" y="515" width="25" height="40" rx="5" fill="#E99363" stroke="#E99363" stroke-width="2"/>
+<rect x="878" y="515" width="25" height="40" rx="5" fill="#E99363" stroke="#E99363" stroke-width="2"/>
+<text x="1302.00" y="539.75" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" fill="#ECF8F2">× 4 = 16</text>
+<text x="785.00" y="580.01" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="400" fill="#A5C2BD">4 angular bins</text>
+<polyline points="575,626 1514,626" fill="none" stroke="#315253" stroke-width="2" stroke-linejoin="round"/>
+<text x="575.00" y="675.33" font-family="Segoe UI, Arial, sans-serif" font-size="27" font-weight="700" fill="#ECF8F2">112 sensory + 8 self values + 8 padding = 128</text>
+<text x="575.00" y="732.17" font-family="Segoe UI, Arial, sans-serif" font-size="23" font-weight="400" fill="#A5C2BD">Fixed size across every creature and every generation.</text>
+<rect x="52" y="824" width="1496" height="104" rx="18" fill="#163B3C" stroke="#42716B" stroke-width="2"/>
+<text x="79.00" y="864.75" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" fill="#A6FFCF">History is an exponential moving average (EMA).</text>
+<text x="79.00" y="902.17" font-family="Segoe UI, Arial, sans-serif" font-size="23" font-weight="400" fill="#A5C2BD">Reproject bins for heading changes; treat translation as an approximation and sweep fading times.</text>
+<text x="52.00" y="973.22" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="400" fill="#A5C2BD">Coarse histories retain temporal context. Newborns start with cleared history, not the parent’s memories.</text>
+</svg>

@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000">
+<rect width="1600" height="1000" fill="#0B2027"/>
+<circle cx="40" cy="55" r="3" fill="#315253"/>
+<circle cx="1480" cy="84" r="3" fill="#315253"/>
+<circle cx="1554" cy="392" r="3" fill="#315253"/>
+<circle cx="31" cy="850" r="3" fill="#315253"/>
+<circle cx="1440" cy="940" r="3" fill="#315253"/>
+<circle cx="1510" cy="760" r="3" fill="#315253"/>
+<text x="52.00" y="51.22" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="700" fill="#A6FFCF">WORMS / ENGINEERING</text>
+<text x="52.00" y="110.97" font-family="Segoe UI, Arial, sans-serif" font-size="43" font-weight="700" fill="#ECF8F2">One heavy creature pass, explicit settlement</text>
+<text x="52.00" y="156.96" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="400" fill="#A5C2BD">Five routine dispatches. Ordered dependencies make shared resources and combat consistent.</text>
+<rect x="52" y="201" width="1496" height="74" rx="18" fill="#163B3C" stroke="#42716B" stroke-width="2"/>
+<text x="79.00" y="240.75" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" fill="#A6FFCF">READ SNAPSHOT  S_t</text>
+<text x="420.00" y="241.96" font-family="Segoe UI, Arial, sans-serif" font-size="24" font-weight="400" fill="#ECF8F2">World state is immutable while creatures sense and choose actions.</text>
+<rect x="52" y="319" width="280" height="286" rx="18" fill="#133038" stroke="#315253" stroke-width="2"/>
+<text x="74.00" y="358.38" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="700" fill="#A5C2BD">01</text>
+<text x="74.00" y="392.64" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" fill="#A5C2BD">CLEAR</text>
+<text x="74.00" y="437.75" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" fill="#ECF8F2">Reset scratch</text>
+<text x="74.00" y="486.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Grid counters</text>
+<text x="74.00" y="521.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Food credits</text>
+<text x="74.00" y="556.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Action intents</text>
+<polyline points="335,450 352,450" fill="none" stroke="#A6FFCF" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="352.00,450.00 343.22,454.79 343.22,445.21" fill="#A6FFCF"/>
+<rect x="356" y="319" width="280" height="286" rx="18" fill="#133038" stroke="#315253" stroke-width="2"/>
+<text x="378.00" y="358.38" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="700" fill="#8D9AF0">02</text>
+<text x="378.00" y="392.64" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" fill="#8D9AF0">GRID BUILD</text>
+<text x="378.00" y="437.75" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" fill="#ECF8F2">Index neighbours</text>
+<text x="378.00" y="486.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Spatial cells</text>
+<text x="378.00" y="521.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">World boundaries</text>
+<text x="378.00" y="556.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Overflow checks</text>
+<polyline points="639,450 656,450" fill="none" stroke="#A6FFCF" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="656.00,450.00 647.22,454.79 647.22,445.21" fill="#A6FFCF"/>
+<rect x="660" y="319" width="280" height="286" rx="18" fill="#133038" stroke="#A6FFCF" stroke-width="2"/>
+<text x="682.00" y="358.38" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="700" fill="#A6FFCF">03</text>
+<text x="682.00" y="392.64" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" fill="#A6FFCF">CREATURE PASS</text>
+<text x="682.00" y="437.75" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" fill="#ECF8F2">Sense + policy</text>
+<text x="682.00" y="486.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Angular bins + history</text>
+<text x="682.00" y="521.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">MLP + sampled actions</text>
+<text x="682.00" y="556.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Movement + intents</text>
+<polyline points="943,450 960,450" fill="none" stroke="#A6FFCF" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="960.00,450.00 951.22,454.79 951.22,445.21" fill="#A6FFCF"/>
+<rect x="964" y="319" width="280" height="286" rx="18" fill="#133038" stroke="#315253" stroke-width="2"/>
+<text x="986.00" y="358.38" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="700" fill="#D8F48B">04</text>
+<text x="986.00" y="392.64" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" fill="#D8F48B">FOOD SETTLEMENT</text>
+<text x="986.00" y="437.75" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" fill="#ECF8F2">Allocate finite food</text>
+<text x="986.00" y="486.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">One patch owner</text>
+<text x="986.00" y="521.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Unique creature credits</text>
+<text x="986.00" y="556.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Exact resource debit</text>
+<polyline points="1247,450 1264,450" fill="none" stroke="#A6FFCF" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="1264.00,450.00 1255.22,454.79 1255.22,445.21" fill="#A6FFCF"/>
+<rect x="1268" y="319" width="280" height="286" rx="18" fill="#133038" stroke="#315253" stroke-width="2"/>
+<text x="1290.00" y="358.38" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="700" fill="#E99363">05</text>
+<text x="1290.00" y="392.64" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" fill="#E99363">FINALIZE</text>
+<text x="1290.00" y="437.75" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" fill="#ECF8F2">Apply outcomes</text>
+<text x="1290.00" y="486.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Gather attack intents</text>
+<text x="1290.00" y="521.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Energy + movement</text>
+<text x="1290.00" y="556.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Write own next state</text>
+<polyline points="800,275 800,311" fill="none" stroke="#A6FFCF" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="800.00,311.00 795.21,302.22 804.79,302.22" fill="#A6FFCF"/>
+<rect x="52" y="649" width="1496" height="76" rx="18" fill="#163B3C" stroke="#42716B" stroke-width="2"/>
+<text x="79.00" y="690.75" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" fill="#A6FFCF">WRITE NEXT STATE  S_t+1</text>
+<text x="520.00" y="691.17" font-family="Segoe UI, Arial, sans-serif" font-size="23" font-weight="400" fill="#ECF8F2">One writer per creature. Swap buffers only after dependent work completes.</text>
+<polyline points="1408,605 1408,642" fill="none" stroke="#E99363" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="1408.00,642.00 1403.21,633.22 1412.79,633.22" fill="#E99363"/>
+<text x="52.00" y="776.22" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="700" fill="#A5C2BD">SEPARATE WORK / ONLY WHEN DUE</text>
+<rect x="52" y="799" width="480" height="119" rx="18" fill="#133038" stroke="#315253" stroke-width="2"/>
+<text x="76.00" y="838.54" font-family="Segoe UI, Arial, sans-serif" font-size="26" font-weight="700" fill="#E99363">Lifecycle</text>
+<text x="76.00" y="878.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Births, deaths, rare genome migration</text>
+<rect x="560" y="799" width="480" height="119" rx="18" fill="#133038" stroke="#315253" stroke-width="2"/>
+<text x="584.00" y="838.54" font-family="Segoe UI, Arial, sans-serif" font-size="26" font-weight="700" fill="#8D9AF0">Learning</text>
+<text x="584.00" y="878.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Matured returns and policy update</text>
+<rect x="1068" y="799" width="480" height="119" rx="18" fill="#133038" stroke="#315253" stroke-width="2"/>
+<text x="1092.00" y="838.54" font-family="Segoe UI, Arial, sans-serif" font-size="26" font-weight="700" fill="#A6FFCF">Rendering</text>
+<text x="1092.00" y="878.59" font-family="Segoe UI, Arial, sans-serif" font-size="21" font-weight="400" fill="#A5C2BD">Draw GPU state; independent cadence</text>
+<text x="52.00" y="973.22" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="400" fill="#A5C2BD">Synchronization lives between dispatches; there is no whole-GPU barrier inside the creature shader.</text>
+</svg>

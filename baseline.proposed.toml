@@ -1,0 +1,104 @@
+# Planning values only. No application currently consumes this file.
+# Begin at stage 0; enable later systems only when their acceptance gates pass.
+
+[run]
+seed = 1
+tick_hz = 60
+benchmark_ticks = 60000
+backend_preference = "d3d12"
+adapter_preference = "NVIDIA GeForce RTX 3050 Ti Laptop GPU"
+
+[world]
+count = 1
+width = 256.0
+height = 256.0
+boundary = "wrap_both_axes"
+initial_population = 256
+slots_per_world = 512
+patches_per_world = 32
+patch_capacity = 80.0
+patch_regeneration_per_second = 6.0
+patch_radius = 5.0
+
+[creature]
+reference_energy = 100.0
+energy_capacity_at_size_one = 100.0
+base_maintenance_per_second = 0.6
+maximum_intake_per_second = 8.0
+size_min = 0.6
+size_max = 1.6
+maximum_speed_min = 3.0
+maximum_speed_max = 9.0
+fov_degrees_min = 60.0
+fov_degrees_max = 300.0
+sensing_range = 24.0
+maximum_age_seconds = 300.0
+# Motion, FOV and capability costs require calibration with scripted controls.
+
+[grid]
+# Independent grid dimensions; each cell is 25.6 x 25.6 in this preset.
+# For other rectangles, derive search radii from width/cells_x and height/cells_y.
+cells_x = 10
+cells_y = 10
+capacity_per_cell = 64
+overflow_invalidates_experiment = true
+
+[policy]
+decision_stride_ticks = 4
+input_width = 128
+hidden_width = 16
+output_width = 8
+current_bins = 16
+fast_bins = 8
+slow_bins = 4
+channels_per_bin = 4
+fast_history_tau_seconds = 0.25
+slow_history_tau_seconds = 1.0
+
+[lifecycle]
+cadence_ticks = 16
+birth_limit_per_world_per_pass = 8
+automatic_reproduction = true
+energy_threshold_fraction = 0.8
+child_energy_capacity_fraction = 0.3
+birth_cost_at_size_one = 5.0
+maturity_seconds = 10.0
+reproduction_cooldown_seconds = 10.0
+parent_reserve_fraction = 0.25
+weight_mutation_probability = 0.01
+weight_mutation_std = 0.02
+morphology_log_mutation_std = 0.02
+fov_mutation_std_degrees = 2.0
+alpha_logit_mutation_std = 0.05
+
+[learning]
+enabled = false
+recorded_decisions = 32
+future_horizon_decisions = 32
+tail_decisions = 32
+freeze_policy_through_tail = true
+optimizer = "sgd"
+learning_rate = 0.0001
+gradient_norm_clip = 1.0
+energy_normalization = "fixed_reference"
+offspring_blend_alpha = 0.0
+evolve_blend_alpha = false
+
+[combat]
+enabled = false
+energy_transfer_to_attacker = false
+
+[migration]
+enabled = false
+interval_ticks = 3600
+genomes_per_world = 1
+export = "birth_genome"
+admission_energy = "deduct_destination_food"
+
+[render]
+width = 1280
+height = 720
+shape = "ellipsoids_with_eyes_and_short_limbs"
+material_goal = "translucent_softly_shaded_gel"
+bloom = false
+vision_cones = "selected_only"
