@@ -28,6 +28,20 @@ def test_focused_view_excludes_control_panel(app):
     assert app.focused_rect() == (288, 8, 984, 704)
 
 
+def test_comparison_graph_and_brain_strip_leave_only_the_world_navigable(app):
+    app.show_comparison = True
+    app.selected_creature = 3
+    assert app.graph_rect() == (280, 304, 1000, 224)
+    assert app.brain_rect() == (0, 528, 1280, 192)
+    assert app.focused_rect() == (288, 8, 984, 288)
+    for point in ((500, 420), (500, 600)):
+        app.zoom(point, 3)
+        app.mouse_down(point)
+        app.mouse_up(point)
+    assert app.camera == Camera()
+    app.sim.pick.assert_not_called()
+
+
 def test_overview_ignores_zoom_drag_and_picking(app):
     app.selected_world = None
 

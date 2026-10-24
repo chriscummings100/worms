@@ -8,9 +8,12 @@ from time import monotonic
 import slangpy as spy
 from PIL import Image
 
+from worms.benchmark import Benchmark
 from worms.brain_view import BrainView, brain_panel_rect
 from worms.camera import Camera
+from worms.comparison_view import ComparisonView, comparison_result
 from worms.sim import ENERGY_PER_UNIT, WORLD_SIZE, Sim
+from worms.snapshots import PeriodicSnapshots, load_snapshot, save_snapshot
 
 SIM_SPEEDS = (1, 2, 5, 10, 20, 50, 100)
 
@@ -49,6 +52,9 @@ class App:
         creature_capacity=None,
         width=1280,
         height=720,
+        benchmark=True,
+        snapshot_dir=Path("artifacts/snapshots"),
+        resume=None,
     ):
         adapter = next(
             a for a in spy.Device.enumerate_adapters(spy.DeviceType.d3d12) if "NVIDIA" in a.name
@@ -62,7 +68,14 @@ class App:
         self.sim = Sim(
             self.device, num_worlds, creatures_per_world, creature_capacity=creature_capacity
         )
+        self.benchmark = Benchmark(self.sim) if benchmark else None
+        self.snapshots = PeriodicSnapshots(snapshot_dir) if snapshot_dir is not None else None
+        self._snapshot_requested = False
+        self._restore_requested = False
+        self.snapshot_status = "Automatic snapshots every 10,000 ticks (keep 5)"
+        self.show_comparison = False
         self.brain_view = BrainView(self.device)
+        self.comparison_view = ComparisonView(self.device, self.brain_view.background)
         self.texture = None
         self.resize(width, height)
         self.paused = False
@@ -75,6 +88,8 @@ class App:
         self._frame_limit = None
         self.window_app = None
         self.window = None
+        if resume is not None:
+            self.restore(resume)
         if not headless:
             self.window_app = spy.App(self.device)
             self.window = _Window(self)
@@ -100,25 +115,43 @@ class App:
         self.cancel_drag()
 
     def views(self):
-        left = (
-            0
-            if self.window is None
-            else min(int(self.window.panel.size.x) + 32, self.texture.width // 2)
-        )
+        left = self.view_left()
         return [
             (world, (x + left, y, width, height))
             for world, (x, y, width, height) in world_views(
                 self.texture.width - left,
-                self.brain_rect()[1] if self.brain_rect() is not None else self.texture.height,
+                self.world_bottom(),
                 self.sim.num_worlds,
                 self.selected_world,
             )
         ]
 
+    def view_left(self):
+        return (
+            0
+            if self.window is None
+            else min(int(self.window.panel.size.x) + 32, self.texture.width // 2)
+        )
+
     def brain_rect(self):
         if self.selected_world is None or self.selected_creature is None:
             return None
         return brain_panel_rect(self.texture.width, self.texture.height)
+
+    def graph_rect(self):
+        if not getattr(self, "show_comparison", False):
+            return None
+        bottom = self.brain_rect()[1] if self.brain_rect() is not None else self.texture.height
+        height = min(224, self.texture.height // 3)
+        left = self.view_left()
+        return (left, bottom - height, self.texture.width - left, height)
+
+    def world_bottom(self):
+        graph = self.graph_rect()
+        brain = self.brain_rect()
+        if graph is not None:
+            return graph[1]
+        return brain[1] if brain is not None else self.texture.height
 
     def focused_rect(self):
         views = self.views()
@@ -267,7 +300,71 @@ class App:
         self._reset = True
         self.selected_world = self.selected_world
 
+    def _snapshot_state(self):
+        metadata = {"speed": self.speed, "paused": self.paused}
+        state = {"metadata": metadata}
+        if self.benchmark is not None:
+            metadata["benchmark"], state["arrays"] = self.benchmark.snapshot_state()
+            state["extra_sims"] = {"benchmark": self.benchmark.sim}
+        return state
+
+    def snapshot(self, path=None):
+        """Save submitted state, including the reference and unfinished benchmark."""
+        state = self._snapshot_state()
+        if path is None:
+            path = self.snapshots.save(self.sim, **state)
+        else:
+            path = save_snapshot(path, self.sim, **state)
+        self.snapshot_status = f"Snapshot saved at tick {self.sim.tick:,}"
+        return path
+
+    def restore(self, path):
+        saved = load_snapshot(path, self.device)
+        self.sim = saved.sim
+        self.benchmark = (
+            Benchmark.from_snapshot(
+                self.sim,
+                saved.extra_sims["benchmark"],
+                saved.metadata["benchmark"],
+                saved.arrays,
+            )
+            if "benchmark" in saved.metadata
+            else None
+        )
+        self.speed = saved.metadata.get("speed", 1)
+        self.paused = True
+        self._step = self._reset = False
+        if self.benchmark is None:
+            self.show_comparison = False
+        self.selected_world = 0 if self.sim.num_worlds == 1 else None
+        if self.snapshots is not None:
+            self.snapshots.reset(self.sim.tick)
+        self.snapshot_status = f"Restored tick {self.sim.tick:,} (paused)"
+        if self.window is not None:
+            self.window.world_selector.items = ["All worlds"] + [
+                f"World {i + 1}" for i in range(self.sim.num_worlds)
+            ]
+
     def update(self, encoder):
+        # Checkpoint/benchmark readbacks only see work submitted by the previous
+        # frame. Never read back a state whose updates are still in this encoder.
+        if self._restore_requested:
+            self.restore(self.snapshots.latest)
+            self._restore_requested = False
+        reset = self._reset
+        if reset:
+            self.sim.reset()
+            if self.benchmark is not None:
+                self.benchmark = Benchmark(self.sim)
+            if self.snapshots is not None:
+                self.snapshots.reset()
+        elif self.benchmark is not None:
+            self.benchmark.prepare(self.sim)
+        if self.snapshots is not None and (
+            self._snapshot_requested or self.snapshots.due(self.sim.tick)
+        ):
+            self.snapshot()
+        self._snapshot_requested = False
         self.sim.apply_settings(encoder)
         # Poll small inspector/counter records before recording the next update.
         if self.selected_creature is not None and monotonic() >= self._next_stats_update:
@@ -278,11 +375,11 @@ class App:
             and monotonic() >= self._next_population_update
         ):
             self.refresh_population()
-        if self._reset:
-            self.sim.reset(encoder)
-        elif self._step or not self.paused:
+        if not reset and (self._step or not self.paused):
             for _ in range(1 if self._step else self.speed):
                 self.sim.update(encoder)
+                if self.benchmark is not None:
+                    self.benchmark.update(encoder)
         self._reset = self._step = False
         self.frame_count += 1
 
@@ -291,6 +388,11 @@ class App:
         brain_rect = self.brain_rect()
         if brain_rect is not None and brain_rect[2] > 0 and brain_rect[3] > 0:
             self.brain_view.prepare(encoder, brain_rect)
+        graph_rect = self.graph_rect()
+        if graph_rect is not None and graph_rect[2] > 0 and graph_rect[3] > 0:
+            self.comparison_view.prepare(
+                encoder, graph_rect, self.benchmark.history if self.benchmark is not None else []
+            )
         with encoder.begin_render_pass(
             {
                 "color_attachments": [
@@ -330,13 +432,18 @@ class App:
                     self.selected_world * self.sim.creature_capacity + self.selected_creature,
                     self.selected_guid,
                 )
+            if graph_rect is not None and graph_rect[2] > 0 and graph_rect[3] > 0:
+                self.comparison_view.render(render_pass, graph_rect)
 
     def frame(self):
         """Submit one headless frame using the same update and render as the window."""
         encoder = self.device.create_command_encoder()
         self.update(encoder)
         self.render(encoder)
-        self.device.submit_command_buffer(encoder.finish())
+        submission = self.device.submit_command_buffer(encoder.finish())
+        # Headless frames have no swapchain to bound work in flight. Retire each
+        # frame before recording more transient D3D12 descriptors at high speed.
+        self.device.wait_for_submit(submission)
 
     def run(self, frames=None):
         if self.window_app is not None:
@@ -345,6 +452,10 @@ class App:
         else:
             for _ in range(120 if frames is None else frames):
                 self.frame()
+        if self.benchmark is not None:
+            self.benchmark.prepare(self.sim)
+        if self.snapshots is not None and self.snapshots.due(self.sim.tick):
+            self.snapshot()
 
     def save(self, path):
         """Save the scene at the last completed frame, without the window's UI."""
@@ -434,6 +545,23 @@ class _Window(spy.AppWindow):
             format="%d ticks",
             callback=lambda value: setattr(owner.sim, "food_age_fade", value),
         )
+        self.comparison_toggle = spy.ui.CheckBox(
+            panel,
+            label="Show comparison graph",
+            callback=lambda value: setattr(owner, "show_comparison", value),
+        )
+        self.comparison_status = spy.ui.Text(panel, text="")
+        self.save_snapshot = spy.ui.Button(
+            panel,
+            label="Snapshot now",
+            callback=lambda: setattr(owner, "_snapshot_requested", True),
+        )
+        self.restore_snapshot = spy.ui.Button(
+            panel,
+            label="Restore latest snapshot",
+            callback=lambda: setattr(owner, "_restore_requested", True),
+        )
+        self.snapshot_status = spy.ui.Text(panel, text="")
         self.inspector = spy.ui.Window(
             self.screen,
             title="Creature",
@@ -478,7 +606,8 @@ class _Window(spy.AppWindow):
         app.resize(context.surface_texture.width, context.surface_texture.height)
         bottom = app.brain_rect()[1] if app.brain_rect() is not None else app.texture.height
         for panel in (self.panel, self.inspector):
-            available_height = max(1, bottom - panel.position.y - 8)
+            limit = app.world_bottom() if panel is self.inspector else bottom
+            available_height = max(1, limit - panel.position.y - 8)
             if panel.size.y > available_height:
                 panel.size = spy.float2(0, available_height)
         app.update(context.command_encoder)
@@ -493,6 +622,22 @@ class _Window(spy.AppWindow):
         self.food_energy.value = app.sim.food_energy
         self.food_age_start.value = app.sim.food_age_start
         self.food_age_fade.value = app.sim.food_age_fade
+        self.comparison_toggle.value = app.show_comparison
+        self.comparison_toggle.enabled = app.benchmark is not None
+        if app.benchmark is not None:
+            benchmark = app.benchmark
+            latest = benchmark.history[-1] if benchmark.history else None
+            result = comparison_result(latest)
+            self.comparison_status.text = (
+                f"Benchmark {benchmark.sim.tick:,}/{benchmark.trial_ticks:,} ticks\n{result}"
+            )
+        else:
+            self.comparison_status.text = "Comparison disabled"
+        self.save_snapshot.enabled = app.snapshots is not None
+        self.restore_snapshot.enabled = (
+            app.snapshots is not None and app.snapshots.latest is not None
+        )
+        self.snapshot_status.text = app.snapshot_status if app.snapshots is not None else ""
         population = app.population_stats
         if population is not None:
             self.status.text = (
@@ -539,11 +684,34 @@ def main(argv=None):
     parser.add_argument("--creatures", type=int, default=64, help="Creatures per world")
     parser.add_argument("--frames", type=int, help="Frames before exit; headless defaults to 120")
     parser.add_argument("--output", type=Path, help="Save the final scene as a PNG")
+    parser.add_argument("--speed", type=int, choices=SIM_SPEEDS, help="Ticks per render; default 1")
+    parser.add_argument("--no-benchmark", action="store_true", help="Run only the live worlds")
+    parser.add_argument("--no-snapshots", action="store_true")
+    parser.add_argument("--snapshot-dir", type=Path, default=Path("artifacts/snapshots"))
+    parser.add_argument("--resume", type=Path, help="Restore a snapshot path, or 'latest'")
     args = parser.parse_args(argv)
     if args.frames is not None and args.frames < 1:
         parser.error("--frames must be positive")
-    app = App(headless=args.headless, num_worlds=args.worlds, creatures_per_world=args.creatures)
+    resume = args.resume
+    if resume == Path("latest"):
+        resume = PeriodicSnapshots(args.snapshot_dir).latest
+        if resume is None:
+            parser.error("No automatic snapshots found in --snapshot-dir")
+    app = App(
+        headless=args.headless,
+        num_worlds=args.worlds,
+        creatures_per_world=args.creatures,
+        benchmark=not args.no_benchmark,
+        snapshot_dir=None if args.no_snapshots else args.snapshot_dir,
+        resume=resume,
+    )
     try:
+        if args.speed is not None:
+            app.speed = args.speed
+        if args.no_benchmark:
+            app.benchmark = None
+        if args.headless:
+            app.paused = False
         app.run(args.frames)
         output = args.output or (Path("artifacts/worlds.png") if args.headless else None)
         if output is not None:

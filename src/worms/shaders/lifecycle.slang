@@ -14,6 +14,7 @@ uint seed;
 uint tick;
 uint food_age_start;
 uint food_age_fade;
+bool mutation_enabled;
 
 // Rates are energy units per second at a one-metre body length.
 public static const float IDLE_ENERGY_COST = 0.05;
@@ -133,8 +134,11 @@ void resolve_lifecycle(uint3 thread_id : SV_DispatchThreadID)
         uint mutation_key = hash_uint(seed ^ hash_uint(world_index + 1u) ^ 0xd1b54a35u);
         mutation_key = hash_uint(mutation_key ^ hash_uint(world.births + 1u));
         for (uint parameter = 0; parameter < BRAIN_PARAMETERS; ++parameter)
-            brain_weights[child_index * BRAIN_PARAMETERS + parameter] =
-                mutate_weight(brain_weights[index * BRAIN_PARAMETERS + parameter], mutation_key, parameter);
+        {
+            float inherited = brain_weights[index * BRAIN_PARAMETERS + parameter];
+            brain_weights[child_index * BRAIN_PARAMETERS + parameter] = mutation_enabled
+                ? mutate_weight(inherited, mutation_key, parameter) : inherited;
+        }
         for (uint neuron = 0; neuron < BRAIN_ACTIVATIONS; ++neuron)
             brain_activations[child_index * BRAIN_ACTIVATIONS + neuron] = 0.0;
         world.births += 1u;

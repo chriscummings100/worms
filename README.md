@@ -1,6 +1,6 @@
 # Worms
 
-A small Python + SlangPy artificial-life project. The application runs independent GPU worlds with creatures driven by random neural networks, clustered food, a windowed viewer, and a headless path for tests and image dumps.
+A small Python + SlangPy artificial-life project. The application runs independent GPU worlds with creatures driven by evolving neural networks, clustered food, competitive benchmarks, restorable checkpoints, a windowed viewer, and a headless path for tests and image dumps.
 
 ## Run
 
@@ -9,14 +9,20 @@ From PowerShell in the repository root:
 ```powershell
 .\.conda\python.exe -m pip install -e ".[dev]"
 
-# Open the application (1 world, 64 creatures).
+# Open the application (1 live world, 64 creatures, 1,024 slots).
 .\.conda\python.exe -m worms
 
 # Advance exactly 120 fixed ticks and save the final scene.
 .\.conda\python.exe -m worms --headless --frames 120 --output artifacts/worlds.png
 
-# Change the initial world and creature counts.
+# Change the initial live world and creature counts.
 .\.conda\python.exe -m worms --worlds 6 --creatures 128
+
+# Run 10,000 ticks, including a complete comparison trial and automatic snapshot.
+.\.conda\python.exe -m worms --headless --frames 100 --speed 100
+
+# Restore the most recent automatic checkpoint; window starts paused.
+.\.conda\python.exe -m worms --resume latest
 ```
 
 The window has a Speed dropdown (Paused, 1x, 2x, 5x, 10x, 20x, 50x and 100x), Step, Reset, and an all-worlds/single-world selector. Speed sets the number of simulation updates per rendered frame. Escape or the close button exits. `--frames N` also works in windowed mode for a finite run. PNG exports contain the scene without UI. A headless run defaults to 120 frames and `artifacts/worlds.png`.
@@ -38,6 +44,9 @@ The application currently targets D3D12 and selects the NVIDIA adapter. It uses 
 - `src/worms/app.py`: device, window/UI, frame loop, tiled/focused views, PNG output.
 - `src/worms/camera.py`: cursor-anchored zoom and pixel-to-world pan math.
 - `src/worms/brain_view.py`: selected-creature activation display and its static labels.
+- `src/worms/benchmark.py` and `comparison_view.py`: frozen-reference competitions and history graph.
+- `src/worms/snapshots.py`: versioned, atomic save/restore and rolling checkpoints.
+- `src/worms/profile.py`: hardware GPU timestamps and CPU/throughput measurements.
 - `src/worms/sim.py`: simulation buffers, compute dispatches, and drawing a world into a rectangle, with optional camera offset and scale.
 - `src/worms/shaders/world.slang`: creature/world records, seeded initialization, and motion.
 - `src/worms/shaders/food.slang`: periodic Perlin density, seeded placement, and gradual food growth.
@@ -54,7 +63,7 @@ The application currently targets D3D12 and selects the NVIDIA adapter. It uses 
 - `docs/` and `assets/`: planning documents and original visual references.
 - `artifacts/`: generated outputs, ignored by Git.
 
-Each world has a fixed block of creature slots in one shared GPU buffer, with **four times its initial population reserved** (64 initial creatures and 256 slots per world by default). `Sim.creatures_per_world` is the initial count; `Sim.creature_capacity` is the allocation stride. Dead slots are reused without moving survivors. Each newborn receives a fresh ID, parent ID, generation and birth tick. The world records its current live count and cumulative births/deaths, shown in the controls. Seeded Reset reproduces the initial state. The action/target fields are placeholders for later simulation work.
+Each world has a fixed block of creature slots in one shared GPU buffer, with **1,024 slots per world by default**, starting with 64 creatures. `Sim.creatures_per_world` is the initial count; `Sim.creature_capacity` is the allocation stride. Dead slots are reused without moving survivors. Each newborn receives a fresh ID, parent ID, generation and birth tick. The world records its current live count and cumulative births/deaths, shown in the controls. Seeded Reset reproduces the initial state. The action/target fields are placeholders for later simulation work.
 
 One world unit is one metre. Worlds are **512 x 512 m**. A default creature's full body length averages **1 m**, with seeded variation from **0.8 to 1.2 m**; body width is 63% of its length. Body size is independent of population and world size. The 64-creature default is sparse: one creature per 4,096 square metres. At whole-world scale creatures are tiny specks; zoom in to inspect them at a useful scale.
 
@@ -115,9 +124,9 @@ Each segment retains one 20-byte observation:
 | `food_energy` | Visible food's own energy in units; zero for a creature |
 | `kind` | Integer: 0 for empty, 1 for food, 2 for creature |
 
-A distance of `-1` and kind of zero mean nothing was seen; the other fields then hold zero. Hidden objects contribute no properties or energy to the observation. A second 4 m spatial grid indexes food, built serially per world after collection and growth. Each observer queries nearby cells in both grids rather than scanning whole populations.
+A distance of `-1` and kind of zero mean nothing was seen; the other fields then hold zero. Hidden objects contribute no properties or energy to the observation. A second 4 m spatial grid indexes food. It is built serially per world on reset and on food-spawn ticks. Between spawns, food stays still and sensing skips eaten entries in the cached lists. Each observer queries nearby cells in both grids rather than scanning whole populations.
 
-The GPU retains **256 complete observations per creature** in a ring buffer, about **4.3 simulated seconds** at 60 ticks/s. Each frame includes all 16 segments plus the observer's position, heading and tick. The default 256 reserved creature slots use 21 MiB for observations and frame headers. Reset clears history and records one initial observation; Pause adds none, and Step adds one. Dead creatures produce invalid frames while their older observations remain until overwritten; reusing a slot clears its entire history before recording the newborn's first observation. Rendering and sensing keep these buffers on the GPU; `sim.inspect_vision(world, local_index, age=0)` reads one retained frame only when explicitly requested for diagnostics.
+The GPU retains **256 complete observations per creature** in a ring buffer, about **4.3 simulated seconds** at 60 ticks/s. Each frame includes all 16 segments plus the observer's position, heading and tick. The default 1,024 reserved creature slots use 84 MiB per world for observations and frame headers. Reset clears history and records one initial observation; Pause adds none, and Step adds one. Dead creatures produce invalid frames while their older observations remain until overwritten; reusing a slot clears its entire history before recording the newborn's first observation. Rendering and sensing keep these buffers on the GPU; `sim.inspect_vision(world, local_index, age=0)` reads one retained frame only when explicitly requested for diagnostics.
 
 Selecting a creature displays its latest captured arc with subtle segment boundaries. A segment's tint indicates the visible object's kind; lime rings mark visible food and orange rings mark visible creatures. Hidden objects receive no vision marker. The overlay uses the recorded observations and pose, including across world seams. Zoom in to see the arc clearly.
 
@@ -144,7 +153,46 @@ Reset captures initial vision and evaluates the brain before the first movement.
 
 The selected creature's bottom display shows all 64 inputs in a 16-column × 4-row grid, 16 hidden neurons and both outputs with steering/movement gauges. Positive activations glow warm, negative activations blue, and zeros stay dim. Activity comes directly from GPU values, without simulated flicker or per-frame CPU readback. Labels, circles and gauges keep their proportions on resize: the content stays at its normal size in wide windows and scales down uniformly when space is limited. The world viewport leaves room for the strip, which does not receive pan, zoom or selection gestures.
 
-Parameters and activations use fixed GPU blocks per creature: **1,074 float32 parameters** and **82 float32 activations**, about 1.13 MiB combined for the default 256 reserved slots. `sim.inspect_brain(world, local_index)` explicitly reads one creature's current inputs, hidden activations and outputs for diagnostics.
+Parameters and activations use fixed GPU blocks per creature: **1,074 float32 parameters** and **82 float32 activations**, about 4.52 MiB combined per world for the default 1,024 reserved slots. `sim.inspect_brain(world, local_index)` explicitly reads one creature's current inputs, hidden activations and outputs for diagnostics.
+
+## Competitive comparison
+
+The app continuously runs two benchmark worlds alongside the live world. Every **10,000 ticks**, equal cohorts of current brains and a frozen copy of the starting population finish a competition. The two worlds swap starting positions; all competitors start with identical bodies, energy and age. Benchmark offspring inherit their side and brain without mutation. Food and lifespan settings stay fixed in the benchmark even when live sliders change.
+
+Toggle **Show comparison graph** to plot the current cohort's share of surviving descendants against the live tick when its brains were sampled. **50% means equal representation; above 50% means the current cohort beat the reference in that trial.** The graph and neuron strip can be visible together. A result needs a full trial, so the first arrives after 10,000 live ticks. Trials without births or deaths may stay at 50%; this does not establish that nothing has improved. Sampling and competition add noise. See [the comparison protocol](docs/COMPARISON.md) for sampling, score interpretation and limits.
+
+Reset starts a fresh reference and clears the graph. `--no-benchmark` runs only the live worlds. The side worlds are for evaluation and do not appear in the live world selector.
+
+## Snapshots
+
+The app saves a restorable checkpoint every **10,000 live ticks** under ignored `artifacts/snapshots/`, keeping the **latest five** automatic files. **Snapshot now** creates a checkpoint in that same rolling set. **Restore latest snapshot** restores it and pauses the app so you can inspect it before continuing. Saves happen at submitted frame boundaries; crossing the interval within a frame can save a few ticks later. A finite run also saves if its final frame reaches a checkpoint boundary.
+
+Checkpoints include creature identities, ages and energy, food, world counters, all network weights and activations, complete vision history, spatial grids, settings and the exact tick. They also preserve the frozen benchmark reference, in-progress comparison worlds and graph results. Restoring does not restart evolution or change the opponent. Camera and creature selection reset; the saved speed is retained. Files are compressed NPZ archives written through an atomic replacement, without pickle. Same-GPU continuation is tested exactly; cross-driver bit-identical replay is not promised.
+
+```powershell
+# Load a particular checkpoint instead of the most recent automatic file.
+.\.conda\python.exe -m worms --resume artifacts/snapshots/auto-<timestamp>-tick-<tick>.npz
+
+# Headless restore continues immediately; an explicit speed overrides the saved one.
+.\.conda\python.exe -m worms --headless --resume latest --frames 100 --speed 100
+
+# Use a separate checkpoint folder, or disable automatic snapshotting.
+.\.conda\python.exe -m worms --snapshot-dir artifacts/experiment-a
+.\.conda\python.exe -m worms --no-snapshots
+```
+
+Saving synchronizes and reads GPU state, so it briefly pauses a run. A live-only checkpoint with 1,024 reserved slots, 64 living creatures and 256 history frames measured about 5.2 MB and 0.77 s to save on this machine; a full session includes the two comparison worlds and costs more. Copy a file outside the rolling `auto-*.npz` set to retain it permanently. `App.snapshot(path)` also writes a named file that automatic retention does not remove.
+
+## Performance
+
+Use hardware timestamps to separate GPU passes from CPU recording/submission:
+
+```powershell
+.\.conda\python.exe -m worms.profile --capacity 1024 --steps-per-frame 100 --output artifacts/profile.json
+.\.conda\python.exe -m worms.profile --capacity 1024 --steps-per-frame 100 --benchmark --output artifacts/profile-comparison.json
+```
+
+On the RTX 3050 Ti Laptop GPU, caching the stationary food grid increased synchronized live-only throughput at 1,024 capacity from **419 to 742 ticks/s**. With both comparison worlds running it measured **315 live ticks/s**. These scenes are GPU-bound, primarily in the serial creature-grid and lifecycle passes. The speed dropdown still means ticks per render, not a guaranteed real-time multiplier. See [the performance report](docs/PERFORMANCE.md) for per-pass timings, full-population results and measurement conditions.
 
 ## Checks
 

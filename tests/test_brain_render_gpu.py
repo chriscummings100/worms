@@ -9,7 +9,9 @@ pytestmark = pytest.mark.gpu
 
 
 def test_panel_uses_selected_gpu_activations_and_pauses_without_changes():
-    app = App(headless=True, num_worlds=2, creatures_per_world=2)
+    app = App(
+        headless=True, benchmark=False, snapshot_dir=None, num_worlds=2, creatures_per_world=2
+    )
     try:
         app.selected_world = 1
         app.selected_creature = 1
@@ -55,7 +57,14 @@ def test_panel_uses_selected_gpu_activations_and_pauses_without_changes():
 
 
 def test_resizing_panel_keeps_neurons_round_and_labels_and_gauges_in_proportion():
-    app = App(headless=True, num_worlds=1, creatures_per_world=1, creature_capacity=1)
+    app = App(
+        headless=True,
+        benchmark=False,
+        snapshot_dir=None,
+        num_worlds=1,
+        creatures_per_world=1,
+        creature_capacity=1,
+    )
     try:
         app.selected_creature = 0
         app.paused = True
@@ -104,7 +113,14 @@ def test_resizing_panel_keeps_neurons_round_and_labels_and_gauges_in_proportion(
 def test_reused_slot_hides_neurons_before_the_next_inspector_poll():
     import slangpy as spy
 
-    app = App(headless=True, num_worlds=1, creatures_per_world=1, creature_capacity=1)
+    app = App(
+        headless=True,
+        benchmark=False,
+        snapshot_dir=None,
+        num_worlds=1,
+        creatures_per_world=1,
+        creature_capacity=1,
+    )
     try:
         app.selected_creature = 0
         app.refresh_stats()

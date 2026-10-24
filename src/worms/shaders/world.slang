@@ -20,6 +20,7 @@ public struct Creature
     public uint birth_tick;
     public uint age_start_tick; // Birth or most recent successful split.
     public float energy_remainder;
+    public uint lineage; // Benchmark cohort; inherited unchanged when splitting.
 }
 
 public struct World

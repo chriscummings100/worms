@@ -13,7 +13,15 @@ pytestmark = pytest.mark.gpu
 
 @pytest.fixture(scope="module")
 def app():
-    application = App(headless=True, num_worlds=1, creatures_per_world=0, width=257, height=149)
+    application = App(
+        headless=True,
+        benchmark=False,
+        snapshot_dir=None,
+        num_worlds=1,
+        creatures_per_world=0,
+        width=257,
+        height=149,
+    )
     yield application
     application.close()
 

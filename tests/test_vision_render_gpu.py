@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from tests.gpu_helpers import fixed_brains
+from tests.gpu_helpers import fixed_brains, rebuild_food_grid
 from worms.app import App
 from worms.sim import FOOD_ENERGY, VISION_HISTORY, WORLD_SIZE, Sim
 
@@ -15,7 +15,15 @@ pytestmark = pytest.mark.gpu
 
 @pytest.fixture(scope="module")
 def app():
-    application = App(headless=True, num_worlds=1, creatures_per_world=0, width=800, height=640)
+    application = App(
+        headless=True,
+        benchmark=False,
+        snapshot_dir=None,
+        num_worlds=1,
+        creatures_per_world=0,
+        width=800,
+        height=640,
+    )
     yield application
     application.close()
 
@@ -45,6 +53,7 @@ def stage_scene(app, origin):
     food[0]["position"] = spy.float2((origin[0] + 8) % WORLD_SIZE, (origin[1] - 4) % WORLD_SIZE)
     food[0]["energy"] = FOOD_ENERGY
     food.apply()
+    rebuild_food_grid(sim)
     fixed_brains(sim)
     sim.update()
     return sim
@@ -118,6 +127,7 @@ def test_overlay_uses_capture_pose_and_nearest_markers_after_scene_changes(app):
     food = food_cursor(sim)
     food[0]["position"] = spy.float2(246, 256)
     food.apply()
+    rebuild_food_grid(sim)
     difference = overlay_difference(app)
     strength = np.max(np.abs(difference), axis=2)
 
@@ -163,6 +173,7 @@ def test_overlay_marks_only_the_nearest_object_in_a_segment(app, front_kind):
     food = food_cursor(sim)
     food[0]["position"] = spy.float2(*(front if front_kind == 1 else back))
     food.apply()
+    rebuild_food_grid(sim)
     sim.update()
     assert sim.inspect_vision(0, 0)["slots"][8]["kind"] == front_kind
     difference = overlay_difference(app)

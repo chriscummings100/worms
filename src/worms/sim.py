@@ -8,6 +8,7 @@ import slangpy as spy
 SHADER_DIR = Path(__file__).parent / "shaders"
 WORLD_SIZE = 512.0  # Metres; matches the shared Slang world constant.
 TIME_STEP = 1.0 / 60.0
+CREATURE_CAPACITY = 1024
 FOOD_CAPACITY = 8192
 INITIAL_FOOD = 2048
 TARGET_FOOD = 4096
@@ -59,11 +60,12 @@ class Sim:
         food_energy=FOOD_ENERGY / ENERGY_PER_UNIT,
         food_age_start=FOOD_AGE_START,
         food_age_fade=FOOD_AGE_FADE,
+        mutation_enabled=True,
     ):
         if num_worlds < 1 or creatures_per_world < 0:
             raise ValueError("Need at least one world and a nonnegative creature count")
         if creature_capacity is None:
-            creature_capacity = 4 * creatures_per_world
+            creature_capacity = CREATURE_CAPACITY
         if creature_capacity < creatures_per_world:
             raise ValueError("Creature capacity must hold the initial population")
         if not 0 <= initial_food <= target_food <= food_capacity or food_per_second < 0:
@@ -82,6 +84,7 @@ class Sim:
         self.food_per_second = food_per_second
         self.food_age_start = food_age_start
         self.food_age_fade = food_age_fade
+        self.mutation_enabled = mutation_enabled
         self.tick = 0
 
         self._initialize = device.create_compute_kernel(
@@ -402,6 +405,7 @@ class Sim:
                 "tick": self.tick + 1,
                 "food_age_start": self.food_age_start,
                 "food_age_fade": self.food_age_fade,
+                "mutation_enabled": self.mutation_enabled,
                 "g_worlds": self.worlds,
                 "g_creatures": self.creatures,
                 "brain_weights": self.brain_weights,
@@ -421,8 +425,7 @@ class Sim:
             },
         )
 
-    def _update_vision(self, encoder):
-        """Capture the settled scene, including newly grown food, without reducing history."""
+    def _update_food_grid(self, encoder):
         self._clear_food_grid.dispatch(
             thread_count=[self.num_worlds * GRID_CELL_COUNT, 1, 1],
             command_encoder=encoder,
@@ -439,6 +442,13 @@ class Sim:
                 "food_grid_next": self.food_grid_next,
             },
         )
+
+    def _update_vision(self, encoder, *, rebuild_food_grid=True):
+        """Capture the settled scene without reducing history."""
+        # Food stays still; capture skips eaten slots still linked in the grid.
+        # Rebuild when spawning may have reused a slot elsewhere.
+        if rebuild_food_grid:
+            self._update_food_grid(encoder)
         self._capture_vision.dispatch(
             thread_count=[max(1, self.num_worlds * self.creature_capacity), 1, 1],
             command_encoder=encoder,
@@ -543,7 +553,7 @@ class Sim:
                 },
             )
         self.tick += 1
-        self._update_vision(encoder)
+        self._update_vision(encoder, rebuild_food_grid=bool(budget))
         self._update_brains(encoder)
         if command_encoder is None:
             self.device.submit_command_buffer(encoder.finish())

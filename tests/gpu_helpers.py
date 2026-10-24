@@ -17,3 +17,10 @@ def fixed_brains(sim, *, steering=0.0, movement=1.0):
     encoder = sim.device.create_command_encoder()
     sim._update_brains(encoder)
     sim.device.submit_command_buffer(encoder.finish())
+
+
+def rebuild_food_grid(sim):
+    """Refresh the spatial cache after a test directly relocates food records."""
+    encoder = sim.device.create_command_encoder()
+    sim._update_food_grid(encoder)
+    sim.device.submit_command_buffer(encoder.finish())

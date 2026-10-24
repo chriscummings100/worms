@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from tests.gpu_helpers import fixed_brains
+from tests.gpu_helpers import fixed_brains, rebuild_food_grid
 from worms.app import App
 from worms.sim import (
     BRAIN_ACTIVATIONS,
@@ -30,7 +30,15 @@ pytestmark = pytest.mark.gpu
 
 @pytest.fixture(scope="module")
 def app():
-    application = App(headless=True, num_worlds=1, creatures_per_world=0, width=257, height=149)
+    application = App(
+        headless=True,
+        benchmark=False,
+        snapshot_dir=None,
+        num_worlds=1,
+        creatures_per_world=0,
+        width=257,
+        height=149,
+    )
     yield application
     application.close()
 
@@ -291,6 +299,7 @@ def test_current_vision_drives_the_next_step_and_old_history_remains_raw(app):
 
     food[0]["position"] = spy.float2(92, 100)
     food.apply()
+    rebuild_food_grid(sim)
     sim.update()
     creature = sim.inspect(0, 0)
     assert creature["heading"] == pytest.approx(command * MAX_TURN_RATE * TIME_STEP, abs=1e-6)

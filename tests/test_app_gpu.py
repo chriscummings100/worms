@@ -17,6 +17,8 @@ def app():
     # Odd dimensions and a partial compute group catch out-of-range writes.
     application = App(
         headless=True,
+        benchmark=False,
+        snapshot_dir=None,
         num_worlds=3,
         creatures_per_world=17,
         creature_capacity=17,

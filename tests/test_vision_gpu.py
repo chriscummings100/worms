@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from tests.gpu_helpers import fixed_brains
+from tests.gpu_helpers import fixed_brains, rebuild_food_grid
 from worms.app import App
 from worms.sim import (
     ENERGY_PER_UNIT,
@@ -25,7 +25,15 @@ pytestmark = pytest.mark.gpu
 
 @pytest.fixture(scope="module")
 def app():
-    application = App(headless=True, num_worlds=1, creatures_per_world=0, width=257, height=149)
+    application = App(
+        headless=True,
+        benchmark=False,
+        snapshot_dir=None,
+        num_worlds=1,
+        creatures_per_world=0,
+        width=257,
+        height=149,
+    )
     yield application
     application.close()
 
@@ -83,6 +91,7 @@ def write_food(sim, positions, energies=None):
             energy > 0 for energy in energies[start : start + sim.food_capacity]
         )
     worlds.apply()
+    rebuild_food_grid(sim)
 
 
 def assert_empty(slots):
@@ -314,12 +323,12 @@ def test_food_spawned_this_tick_is_visible_in_the_same_capture(app):
     assert_empty(sim.inspect_vision(0, 0, age=1)["slots"])
 
 
-def test_food_grid_keeps_high_slots_and_clears_removed_links_without_cross_world_entries(app):
+def test_cached_food_grid_keeps_high_slots_and_ignores_eaten_links_without_cross_world_entries(app):
     sim = make_sim(app, food=5, worlds=2)
     write_creatures(sim, [(100, 100), (100, 100)])
     write_food(
         sim,
-        [(105, 100), (105, 100), (108, 100), (108, 100), (108, 100)] * 2,
+        [(108, 100), (108, 100), (109, 100), (109, 100), (109, 100)] * 2,
         [0, FOOD_ENERGY, 0, 0, 2 * FOOD_ENERGY] * 2,
     )
     sim.update()
@@ -350,8 +359,12 @@ def test_food_grid_keeps_high_slots_and_clears_removed_links_without_cross_world
     food.apply()
     sim.update()
     found, links = members()
-    assert found == [{1}, {6, 9}]
-    assert links[4] == -1
+    assert found == [{1, 4}, {6, 9}]
+    assert links[4] == 1
+    # Rebuilding removes the dead link; retaining it must not change sensing.
+    rebuild_food_grid(sim)
+    assert members()[0] == [{1}, {6, 9}]
+    assert members()[1][4] == -1
     assert sim.inspect_vision(0, 0)["slots"][8]["food_energy"] == FOOD_ENERGY / ENERGY_PER_UNIT
 
 
@@ -369,6 +382,32 @@ def test_changed_food_energy_is_captured_without_rewriting_older_observations(ap
     assert current["slots"][8]["food_energy"] == 6.25
     assert current["slots"][8]["distance"] == before["slots"][8]["distance"]
     assert sim.inspect_vision(0, 0, age=1) == before
+
+
+def test_respawning_an_eaten_slot_rebuilds_its_cached_location(app):
+    sim = make_sim(app, food=1)
+    write_creatures(sim, [(100, 100)])
+    write_food(sim, [(104, 100)])
+    sim.update()
+    write_creatures(sim, [(104, 100)])
+    sim.update()
+    assert cursor_for(sim, "food")[0]["energy"].read() == 0
+    old_cell = 25 * GRID_SIZE + 26
+    assert sim.food_grid_heads.to_numpy().view(np.int32).reshape(-1)[old_cell] == 0
+
+    sim.food_per_second = 60
+    sim.update()
+    spawned = tuple(cursor_for(sim, "food")[0]["position"].read())
+    new_cell = int(spawned[1] // 4) * GRID_SIZE + int(spawned[0] // 4)
+    assert new_cell != old_cell
+    heads = sim.food_grid_heads.to_numpy().view(np.int32).reshape(-1)
+    assert heads[old_cell] == -1 and heads[new_cell] == 0
+    sim.food_per_second = 0
+    write_creatures(sim, [((spawned[0] - 8) % WORLD_SIZE, spawned[1])])
+    sim.update()
+    visible = sim.inspect_vision(0, 0)["slots"][8]
+    assert visible["kind"] == 1
+    assert visible["distance"] == pytest.approx(8, abs=2e-5)
 
 
 def test_history_rollover_preserves_full_frames_and_reset_invalidates_old_samples(app):

@@ -25,7 +25,15 @@ pytestmark = pytest.mark.gpu
 
 @pytest.fixture(scope="module")
 def app():
-    application = App(headless=True, num_worlds=1, creatures_per_world=0, width=257, height=149)
+    application = App(
+        headless=True,
+        benchmark=False,
+        snapshot_dir=None,
+        num_worlds=1,
+        creatures_per_world=0,
+        width=257,
+        height=149,
+    )
     yield application
     application.close()
 
@@ -83,17 +91,19 @@ def assert_small_mutation(child, parent):
 
 
 def population(sim, world=0):
-    return [sim.inspect(world, index) for index in range(sim.creature_capacity)]
+    cursor = cursor_for(sim)
+    start = world * sim.creature_capacity
+    return [cursor[start + index].read() for index in range(sim.creature_capacity)]
 
 
 def test_initial_energy_and_split_threshold_scale_with_body_length_and_reserve_slots(app):
     sim = make_sim(app, creatures=7, worlds=2)
     assert sim.creatures_per_world == 7
-    assert sim.creature_capacity == 28
+    assert sim.creature_capacity == 1024
     guids = []
     for world in range(2):
         records = population(sim, world)
-        assert [creature["alive"] for creature in records] == [True] * 7 + [False] * 21
+        assert [creature["alive"] for creature in records] == [True] * 7 + [False] * (1024 - 7)
         for creature in records[:7]:
             expected = round(INITIAL_ENERGY * 2 * creature["radii"][0])
             assert creature["energy"] == expected
