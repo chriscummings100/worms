@@ -1,1 +1,1 @@
-"""Worms: a small artificial ecosystem, beginning with a GPU render proof."""
+"""Worms: a small artificial ecosystem running on the GPU."""
