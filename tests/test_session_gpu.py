@@ -122,7 +122,7 @@ def test_waiting_benchmark_roundtrips_and_captures_only_a_submitted_batch(tmp_pa
 
         # Distinguish the later reference from the initial random population.
         weights = initial_weights.copy()
-        weights.view(np.float32).reshape(-1)[0] += 1.0
+        weights.view(np.float16).reshape(-1)[0] += 1.0
         app.sim.brain_weights.copy_from_numpy(weights)
         app.sim.input_mutation_probability = 0.17
         app.sim.policy_mutation_probability = 0.29

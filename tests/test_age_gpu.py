@@ -102,7 +102,7 @@ def test_expiry_kills_without_food_despite_reserves_before_it_can_split(app):
     assert creature["age_start_tick"] == 0
     assert not sim.inspect(0, 1)["alive"]
     assert sim.inspect_vision(0, 0)["tick"] == 100_000
-    np.testing.assert_array_equal(sim.brain_activations.to_numpy().view(np.float32), 0)
+    np.testing.assert_array_equal(sim.brain_activations.to_numpy().view(np.float16), 0)
     assert grid_membership(sim.grid_heads.to_numpy(), sim.grid_next.to_numpy()) == [{(25, 25): {0}}]
     for _ in range(3):
         sim.update()

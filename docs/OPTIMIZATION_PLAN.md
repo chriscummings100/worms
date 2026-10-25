@@ -21,6 +21,38 @@ documented and tested explicitly.
 
 ## Baseline and success criteria
 
+**Current reference (25 October, sustained capture):** use the preserved
+`checkpoints/13-million-ticks/snapshot.npz`, SHA-256
+`378bca806376c52c1905872668148a47d3f357381089a2df512978a0cb49d8b1`,
+with `worms.throughput` at 100 steps/frame and 180 seconds per workload.
+See [the current measurements](PERFORMANCE.md) for the method and results.
+The original baseline below predates changed reproduction and benchmark rules;
+its checkpoint's benchmark protocol is no longer accepted by the current app.
+Use matching checkpoints, rules and validation settings for new comparisons.
+
+The new three-minute averages are 2,704.5 live steps/s and 1,527.8 with the
+comparison pair. CPU preparation varies substantially while GPU cost stays near
+19.7 / 41.3 ms per 100-step frame. A sequential drawing-off run averages 2,455.8
+steps/s; differing CPU conditions prevent attributing that difference to drawing.
+Detailed brain/vision shares are 31.5% / 16.3% for the complete session; drawing
+is 0.11 ms per frame. These captures add evidence and repeatable measurement,
+not another completed optimization milestone. Nsight batch timelines and the
+full named-dispatch table are linked from PERFORMANCE.md.
+
+**Implemented next:** 25-tick submissions overlap CPU recording and GPU work
+inside each refresh. Native FP16 neural inference halves network allocations;
+all inference math is now half, while initialization and mutations stay FP32.
+In two short actual-window
+repeats, comparisons improve from 1,710 to 2,128 steps/s at 100 steps/refresh.
+At 1,000 steps/refresh, comparisons reach 2,529 and live-only 6,204 steps/s.
+Live-only at 100 steps/refresh is 6% slower in the window measurements, so the
+gain is not universal. Those window measurements precede the final all-half
+normalization and activation change; see PERFORMANCE.md for its separate kernel
+measurements. See PERFORMANCE.md for matched shader profiles, precision
+bounds and method limits. Async inspector/counter readback remains future work.
+
+### Historical optimization baseline
+
 Use the unchanged `artifacts/performance/checkpoint-100000.npz`, SHA-256
 `a87b98d2df0a8a59af9b96b544454f082fb15c120ca53556baffc0679d42aefc`.
 It has 91 live creatures and 67 food pieces, plus a fresh benchmark pair. Each
@@ -103,9 +135,10 @@ Acceptance for each milestone:
 11. **Wider vision.** Parallelize across creature × segment while avoiding sixteen
     copies of the complete neighborhood scan. Preserve nearest-object occlusion
     and full-resolution history; history reduction remains separate future work.
-12. **Batching and overlap.** The existing app already records 100 ticks in one
-    encoder with no per-tick wait/readback. Improve bounded batches in flight and
-    async diagnostics later; retain a synchronized profiling mode for comparisons.
+12. **Batching and overlap.** Submit chunks of simulation ticks while recording
+    subsequent chunks, with a bounded number in flight. Keep one draw per refresh
+    and a synchronized profiling mode for comparisons. Async diagnostics remain
+    a separate improvement.
 13. **Reusable SlangPy shader objects.** SlangPy supports building a `ShaderObject`
     once and reusing it for repeated dispatches. Put the simulation's persistent
     buffers and mostly constant settings in a shared `ParameterBlock` in the
@@ -130,7 +163,7 @@ Acceptance for each milestone:
 | P5 | Stable identities, compact hot arrays and GUID lookup | Planned | P2/P4 |
 | P6 | Creature × segment vision | Complete; correctness and isolated GPU timings verified | P2; coordinate with P5 |
 | P7 | GPU indirect dispatch where useful | Measure first | P5 |
-| P8 | Bounded CPU/GPU overlap and async UI readback | Planned | P4 |
+| P8 | Bounded CPU/GPU overlap and async UI readback | In-refresh overlap implemented; async UI reads planned | No P4 dependency for in-refresh chunks |
 | P9 | End-to-end measurement and documentation | At each milestone; final pass pending | All accepted changes |
 
 ### P1 — parallel atomic grids
@@ -399,16 +432,40 @@ kernel was swapped during measurement. End-to-end profiling remains under P9.
 
 ### P8 — CPU/GPU overlap and UI diagnostics
 
-- [ ] Keep the existing for-loop batching; remove no per-tick waits because there
-  are none. Measure Python recording cost after reducing dispatch chains.
-- [ ] Keep two or three bounded submissions in flight with explicit completion
-  tracking; respect transient descriptor and command-resource lifetime.
+The implemented first stage submits bounded chunks within one refresh. It does
+not require combined live/benchmark allocations or duplicate simulation state.
+The same queue orders every chunk, followed by one draw/present. At 100 steps,
+the default records four 25-step chunks; CPU recording overlaps earlier GPU work.
+SlangPy owns the final window encoder and presentation, while our FIFO retains
+intermediate command resources until completion. Low-speed window presentation
+remains bounded by SlangPy's swapchain.
+
+- [x] Keep the existing simulation tick loop and submit it in bounded chunks.
+  There were no per-tick waits to remove.
+- [x] Keep at most two main submissions in flight at high speed, including a
+  reserved slot for the SDK's final submission; retain command-buffer references.
 - [ ] Stage inspector/counter reads asynchronously and tag them with world, tick
   and GUID. An old response must not follow a replacement creature.
-- [ ] Synchronize reset/restore, snapshot capture and benchmark trial handoffs at
+- [x] Synchronize reset/restore, snapshot capture and benchmark trial handoffs at
   deliberate boundaries. Checkpoints must represent coherent completed ticks.
-- [ ] Measure pipelined throughput separately from synchronized pass attribution.
-  Include UI responsiveness, memory use and long-run descriptor stability checks.
+- [x] Measure pipelined throughput separately from synchronized pass attribution.
+  Actual window comparisons, paired Nsight timelines and a 151,000-tick run pass.
+  Window frame p95 improves from 103.8 to 63.6 ms in the matched Nsight capture.
+  Resource bounds are tested; the 1,000-step run completes 6,040 main submissions
+  without descriptor exhaustion. Network allocations halve. Hardware occupancy
+  and a full device-memory residency profile remain unmeasured.
+
+The adopted FP16 neural path uses half storage and all-half inference arithmetic.
+FP32 observations convert only at the input boundary. Initialization and mutation
+are outside inference and remain FP32. Scalar half storage with float accumulation
+was slower and is not used. The all-half follow-up has a maximum measured control
+difference of 0.001182 on fixed saved observations; future trajectories can diverge.
+Offline DXIL has no widening, FP32 arithmetic or FP32 intrinsic calls in inference.
+Interleaved fixed-input timings show this follow-up is 3–4% slower than the prior
+half-dot/float-activation variant on this device, while still beating all-FP32.
+Snapshot format 5 migrates old network buffers and preserves source archives.
+Final validation totals 289 tests (97 CPU, 192 GPU), plus Ruff lint/format checks.
+Detailed results and native Nsight capture names are in PERFORMANCE.md.
 
 ## Validation and measurement commands
 

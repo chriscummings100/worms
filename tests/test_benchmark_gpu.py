@@ -49,7 +49,7 @@ def creatures(sim):
 
 
 def weights(sim):
-    return sim.brain_weights.to_numpy().view(np.float32).reshape(-1, BRAIN_PARAMETERS)
+    return sim.brain_weights.to_numpy().view(np.float16).reshape(-1, BRAIN_PARAMETERS)
 
 
 def advance(benchmark, ticks):

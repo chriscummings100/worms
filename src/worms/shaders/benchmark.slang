@@ -3,12 +3,12 @@ import brain_types;
 
 StructuredBuffer<Creature> current_creatures;
 StructuredBuffer<Creature> reference_creatures;
-StructuredBuffer<float> current_weights;
-StructuredBuffer<float> reference_weights;
+StructuredBuffer<half> current_weights;
+StructuredBuffer<half> reference_weights;
 StructuredBuffer<uint> sample_order;
 RWStructuredBuffer<Creature> trial_creatures;
 RWStructuredBuffer<World> trial_worlds;
-RWStructuredBuffer<float> trial_weights;
+RWStructuredBuffer<half> trial_weights;
 RWStructuredBuffer<Food> trial_food;
 RWStructuredBuffer<uint> counts;
 uint source_count;

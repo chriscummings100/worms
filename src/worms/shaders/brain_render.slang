@@ -5,7 +5,7 @@ Texture2D<float4> labels;
 float2 resolution;
 float content_scale;
 float2 content_offset;
-StructuredBuffer<float> activations;
+StructuredBuffer<half> activations;
 StructuredBuffer<Creature> creatures;
 uint creature_index;
 int64_t selected_guid;

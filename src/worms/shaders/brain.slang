@@ -5,8 +5,8 @@ import brain_types;
 StructuredBuffer<Creature> g_creatures;
 StructuredBuffer<VisionSlot> vision_history;
 StructuredBuffer<VisionFrame> vision_frames;
-RWStructuredBuffer<float> brain_weights;
-RWStructuredBuffer<float> brain_activations;
+RWStructuredBuffer<half> brain_weights;
+RWStructuredBuffer<half> brain_activations;
 uint num_worlds;
 uint creatures_per_world;
 uint seed;
@@ -37,9 +37,9 @@ void initialize_brains(uint3 thread_id : SV_DispatchThreadID)
     {
         bool hidden_weight = parameter < 1024u;
         bool output_weight = parameter >= 1040u && parameter < 1072u;
-        brain_weights[base + parameter] = hidden_weight || output_weight
+        brain_weights[base + parameter] = half(hidden_weight || output_weight
             ? random_weight(key, parameter, hidden_weight ? hidden_limit : output_limit)
-            : 0.0;
+            : 0.0);
     }
 }
 
@@ -56,12 +56,13 @@ void evaluate_brains(uint3 thread_id : SV_DispatchThreadID)
     if (!g_creatures[index].alive || vision_frames[frame_index].tick != int(tick))
     {
         for (uint neuron = 0; neuron < BRAIN_ACTIVATIONS; ++neuron)
-            brain_activations[activation_base + neuron] = 0.0;
+            brain_activations[activation_base + neuron] = half(0);
         return;
     }
 
-    float inputs[BRAIN_INPUTS] = {};
-    float hidden[BRAIN_HIDDEN] = {};
+    // Convert observations once at the boundary; all inference math stays FP16.
+    half inputs[BRAIN_INPUTS] = {};
+    half hidden[BRAIN_HIDDEN] = {};
     for (uint segment = 0; segment < VISION_SLOTS; ++segment)
     {
         VisionSlot slot = vision_history[frame_index * VISION_SLOTS + segment];
@@ -69,15 +70,17 @@ void evaluate_brains(uint3 thread_id : SV_DispatchThreadID)
         bool creature_present = slot.kind == VISION_CREATURE;
         bool present = food_present || creature_present;
         uint first = segment * 4u;
-        inputs[first] = present ? saturate(1.0 - slot.distance / VISION_RANGE) : 0.0;
-        inputs[first + 1u] = present ? slot.size / (slot.size + 1.0) : 0.0;
-        inputs[first + 2u] = food_present ? 1.0 : 0.0;
-        inputs[first + 3u] = creature_present ? 1.0 : 0.0;
+        half distance = half(slot.distance);
+        half size = half(slot.size);
+        inputs[first] = present ? saturate(half(1) - distance / half(VISION_RANGE)) : half(0);
+        inputs[first + 1u] = present ? size / (size + half(1)) : half(0);
+        inputs[first + 2u] = food_present ? half(1) : half(0);
+        inputs[first + 3u] = creature_present ? half(1) : half(0);
     }
     uint weight_base = index * BRAIN_PARAMETERS;
     for (uint neuron = 0; neuron < BRAIN_HIDDEN; ++neuron)
     {
-        float value = brain_weights[weight_base + 1024u + neuron];
+        half value = brain_weights[weight_base + 1024u + neuron];
         for (uint input = 0; input < BRAIN_INPUTS; ++input)
             value += inputs[input] * brain_weights[weight_base + neuron * BRAIN_INPUTS + input];
         hidden[neuron] = tanh(value);
@@ -88,11 +91,11 @@ void evaluate_brains(uint3 thread_id : SV_DispatchThreadID)
         brain_activations[activation_base + BRAIN_INPUTS + neuron] = hidden[neuron];
     for (uint output = 0; output < BRAIN_OUTPUTS; ++output)
     {
-        float value = brain_weights[weight_base + 1072u + output];
+        half value = brain_weights[weight_base + 1072u + output];
         for (uint neuron = 0; neuron < BRAIN_HIDDEN; ++neuron)
             value += hidden[neuron]
                 * brain_weights[weight_base + 1040u + output * BRAIN_HIDDEN + neuron];
         brain_activations[activation_base + BRAIN_INPUTS + BRAIN_HIDDEN + output] =
-            output == 0u ? tanh(value) : saturate(0.5 + value);
+            output == 0u ? tanh(value) : saturate(half(0.5) + value);
     }
 }

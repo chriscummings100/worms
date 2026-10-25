@@ -815,7 +815,7 @@ class Sim:
             * BRAIN_ACTIVATIONS
             * layout.stride,
         )
-        values = [cursor[i].read() for i in range(BRAIN_ACTIVATIONS)]
+        values = [float(cursor[i].read()) for i in range(BRAIN_ACTIVATIONS)]
         return {
             "tick": self.tick,
             "inputs": values[:BRAIN_INPUTS],

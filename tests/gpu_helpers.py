@@ -52,7 +52,7 @@ def assert_sim_buffers_equal(actual, expected):
 def fixed_brains(sim, *, steering=0.0, movement=1.0):
     """Replace weights with a constant policy, then evaluate it before movement."""
     count = sim.num_worlds * sim.creature_capacity
-    weights = np.zeros((count, BRAIN_PARAMETERS), dtype=np.float32)
+    weights = np.zeros((count, BRAIN_PARAMETERS), dtype=np.float16)
     weights[:, 1072] = math.atanh(steering) if abs(steering) < 1 else math.copysign(20, steering)
     weights[:, 1073] = movement - 0.5
     sim.brain_weights.copy_from_numpy(weights)
@@ -66,3 +66,16 @@ def rebuild_food_grid(sim):
     encoder = sim.device.create_command_encoder()
     sim._update_food_grid(encoder)
     sim.device.submit_command_buffer(encoder.finish())
+
+
+def legacy_neural_buffers(payload, manifest):
+    """Build an authentic pre-v5 FP32 neural layout from a modern test archive."""
+    keys = [
+        entry["buffers"][field]
+        for entry in manifest["sims"]
+        for field in ("brain_weights", "brain_activations")
+    ]
+    if "reference_weights" in manifest["arrays"]:
+        keys.append(manifest["arrays"]["reference_weights"])
+    for key in keys:
+        payload[key] = payload[key].view(np.float16).astype(np.float32).view(np.uint8)

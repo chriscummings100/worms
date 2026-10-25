@@ -3,7 +3,7 @@
 import numpy as np
 import slangpy as spy
 
-from .sim import ENERGY_PER_UNIT, FOOD_ENERGY, FOOD_PER_SECOND, SHADER_DIR, Sim
+from .sim import BRAIN_PARAMETERS, ENERGY_PER_UNIT, FOOD_ENERGY, FOOD_PER_SECOND, SHADER_DIR, Sim
 
 TRIAL_TICKS = 100_000
 REFERENCE_WARMUP_TICKS = 200_000
@@ -87,8 +87,8 @@ class Benchmark:
             label="benchmark-reference-creatures",
         )
         self.reference_weights = device.create_buffer(
-            size=live_sim.brain_weights.size,
-            struct_size=4,
+            element_count=live_sim.num_worlds * live_sim.creature_capacity * BRAIN_PARAMETERS,
+            resource_type_layout=self._initialize.reflection.reference_weights,
             usage=usage,
             label="benchmark-reference-weights",
         )

@@ -83,7 +83,7 @@ def advance(sim, ticks):
 
 
 def parameters(sim):
-    return sim.brain_weights.to_numpy().view(np.float32).reshape(-1, BRAIN_PARAMETERS)
+    return sim.brain_weights.to_numpy().view(np.float16).reshape(-1, BRAIN_PARAMETERS)
 
 
 def assert_small_mutation(child, parent):
@@ -172,7 +172,7 @@ def test_fractional_idle_cost_accumulates_and_death_is_recorded_once(app):
     assert dead["velocity"] == (0, 0)
     # Detection used the live creature before costs killed it in resolution.
     assert sim.inspect_vision(0, 0)["tick"] == 2
-    np.testing.assert_array_equal(sim.brain_activations.to_numpy().view(np.float32), 0)
+    np.testing.assert_array_equal(sim.brain_activations.to_numpy().view(np.float16), 0)
     assert grid_membership(sim.grid_heads.to_numpy(), sim.grid_next.to_numpy()) == [{(25, 25): {0}}]
     advance(sim, 4)
     assert sim.inspect_vision(0, 0) is None
@@ -261,7 +261,7 @@ def test_split_mutates_inherited_network_and_copies_body_with_fresh_identity_and
             assert sim.inspect_vision(world, slot, age=1) is None
         np.testing.assert_array_equal(
             sim.brain_activations.to_numpy()
-            .view(np.float32)
+            .view(np.float16)
             .reshape(-1, BRAIN_ACTIVATIONS)[offset : offset + 2],
             0,
         )
@@ -505,8 +505,8 @@ def test_empty_population_can_keep_reserved_slots_without_spawning_spontaneously
     for world in range(2):
         stats = sim.inspect_world(world)
         assert (stats["num_creatures"], stats["births"], stats["deaths"]) == (0, 0, 0)
-    assert sim.brain_activations.to_numpy().view(np.float32).size == 10 * BRAIN_ACTIVATIONS
-    np.testing.assert_array_equal(sim.brain_activations.to_numpy().view(np.float32), 0)
+    assert sim.brain_activations.to_numpy().view(np.float16).size == 10 * BRAIN_ACTIVATIONS
+    np.testing.assert_array_equal(sim.brain_activations.to_numpy().view(np.float16), 0)
 
 
 def test_newborn_waits_for_its_first_observation_before_moving(app):
@@ -590,7 +590,7 @@ def test_sparse_lifecycle_preserves_priority_across_bitsets_and_worlds(app):
         .reshape(VISION_HISTORY, count, VISION_SLOTS, 5)
     )
     activations = (
-        sim.brain_activations.to_numpy().view(np.float32).reshape(count, BRAIN_ACTIVATIONS)
+        sim.brain_activations.to_numpy().view(np.float16).reshape(count, BRAIN_ACTIVATIONS)
     )
     np.testing.assert_array_equal(
         sim.lifecycle_counts.to_numpy().view(np.uint32).reshape(2, 3),
@@ -789,13 +789,16 @@ def test_mutation_probabilities_are_captured_per_birth_in_one_encoder(app):
 
 def test_input_and_policy_mutation_probabilities_control_independent_blocks(app):
     sim = make_sim(app, capacity=2)
-    original = parameters(sim)[0].copy()
+    # Zero weights make every selected Gaussian mutation visible in half storage.
+    # A tiny mutation to a larger inherited half can legitimately round unchanged.
+    original = np.zeros_like(parameters(sim)[0])
     for input_probability, policy_probability in ((0.0, 1.0), (1.0, 0.0), (0.0, 0.0)):
         sim.input_mutation_probability = input_probability
         sim.policy_mutation_probability = policy_probability
         sim.reset()
         assert sim.input_mutation_probability == input_probability
         assert sim.policy_mutation_probability == policy_probability
+        sim.brain_weights.copy_from_numpy(np.tile(original, (sim.creature_capacity, 1)))
         stage(sim, 0, energy=2 * INITIAL_ENERGY + 10)
         sim.update()
         for child in parameters(sim):

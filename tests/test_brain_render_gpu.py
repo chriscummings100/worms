@@ -22,7 +22,7 @@ def test_panel_uses_selected_gpu_activations_and_pauses_without_changes():
         app.selected_creature = 1
         app.paused = True
         capacity = app.sim.creature_capacity
-        values = np.zeros(2 * capacity * 82, dtype=np.float32)
+        values = np.zeros(2 * capacity * 82, dtype=np.float16)
         selected = values.reshape(2 * capacity, 82)[capacity + 1]
         selected[3 * 4 + 2] = 1.0
         selected[64] = -1.0
@@ -74,7 +74,7 @@ def test_resizing_panel_keeps_neurons_round_and_labels_and_gauges_in_proportion(
     try:
         app.selected_creature = 0
         app.paused = True
-        values = np.zeros(82, dtype=np.float32)
+        values = np.zeros(82, dtype=np.float16)
         values[0] = 1.0
         values[64] = -1.0
         values[80] = -1.0
@@ -133,7 +133,7 @@ def test_reused_slot_hides_neurons_before_the_next_inspector_poll():
         app.refresh_stats()
         app._next_stats_update = float("inf")
         app.paused = True
-        app.sim.brain_activations.copy_from_numpy(np.ones(82, dtype=np.float32))
+        app.sim.brain_activations.copy_from_numpy(np.ones(82, dtype=np.float16))
         app.frame()
         bright = app.texture.to_numpy().copy()
         top = app.brain_rect()[1]

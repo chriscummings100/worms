@@ -17,7 +17,7 @@ import numpy as np
 
 from worms.sim import Sim
 
-FORMAT_VERSION = 4  # Splitting creates two new identities and independently mutated brains.
+FORMAT_VERSION = 5  # Neural weights and activations are stored as native FP16.
 SNAPSHOT_INTERVAL = 100_000
 SNAPSHOT_KEEP = 5
 SIM_BUFFERS = (
@@ -59,6 +59,24 @@ class Snapshot:
     extra_sims: dict
     metadata: dict
     arrays: dict
+
+
+def _neural_buffer(value, expected_size, field, version):
+    """Validate bytes and migrate legacy FP32 network storage to native FP16.
+
+    Migration intentionally quantizes the old policy, so its future trajectory
+    can differ. The source archive is never rewritten. Reject overflow instead
+    of silently introducing an infinite weight into a previously finite policy.
+    """
+    if value.dtype != np.uint8 or value.ndim != 1:
+        raise ValueError(f"Invalid snapshot buffer: {field}")
+    old_storage = version < 5
+    if value.nbytes != expected_size * (2 if old_storage else 1):
+        raise ValueError(f"Snapshot buffer layout no longer matches: {field}")
+    values = value.view(np.float32 if old_storage else np.float16)
+    if not np.isfinite(values).all() or np.any(np.abs(values) > np.finfo(np.float16).max):
+        raise ValueError(f"Snapshot {field} contains values outside finite FP16 range")
+    return values.astype(np.float16).view(np.uint8) if old_storage else value
 
 
 def _write_archive(path, payload):
@@ -125,7 +143,7 @@ def load_snapshot(path, device):
     simulations = []
     with np.load(path, allow_pickle=False) as archive:
         manifest = json.loads(str(archive["manifest"]))
-        if manifest["version"] not in (1, 2, 3, FORMAT_VERSION):
+        if manifest["version"] not in (1, 2, 3, 4, FORMAT_VERSION):
             raise ValueError(f"Unsupported snapshot version: {manifest['version']}")
         entries = manifest["sims"]
         if not entries or entries[0]["name"] is not None:
@@ -147,6 +165,10 @@ def load_snapshot(path, device):
                     # is restarted separately, retaining the original opponent.
                     continue
                 value = archive[entry["buffers"][field]]
+                if field in ("brain_weights", "brain_activations"):
+                    value = _neural_buffer(
+                        value, getattr(current, field).size, field, manifest["version"]
+                    )
                 if value.dtype != np.uint8 or value.ndim != 1:
                     raise ValueError(f"Invalid snapshot buffer: {field}")
                 if value.nbytes != getattr(current, field).size:
@@ -159,6 +181,13 @@ def load_snapshot(path, device):
             current._food_energy_dirty = entry["food_energy_dirty"]
             simulations.append(current)
         arrays = {name: archive[key].copy() for name, key in manifest["arrays"].items()}
+        if "reference_weights" in arrays:
+            arrays["reference_weights"] = _neural_buffer(
+                arrays["reference_weights"].view(np.uint8).reshape(-1),
+                simulations[0].brain_weights.size,
+                "reference_weights",
+                manifest["version"],
+            )
     return Snapshot(
         sim=simulations[0],
         extra_sims={entry["name"]: current for entry, current in zip(entries[1:], simulations[1:])},

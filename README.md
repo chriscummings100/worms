@@ -25,7 +25,7 @@ From PowerShell in the repository root:
 .\.conda\python.exe -m worms --resume latest
 ```
 
-The window has a Speed dropdown (Paused, 1x, 2x, 5x, 10x, 20x, 50x and 100x), Step, Reset, and an all-worlds/single-world selector. Speed sets the number of simulation updates per rendered frame. Escape or the close button exits. `--frames N` also works in windowed mode for a finite run. PNG exports contain the scene without UI. A headless run defaults to 120 frames and `artifacts/worlds.png`.
+The window has a Speed dropdown (Paused, 1x, 2x, 5x, 10x, 20x, 50x, 100x, 200x, 500x and 1000x), Step, Reset, and an all-worlds/single-world selector. Speed sets the number of simulation updates per rendered frame. Escape or the close button exits. `--frames N` also works in windowed mode for a finite run. PNG exports contain the scene without UI. A headless run defaults to 120 frames and `artifacts/worlds.png`.
 
 Select a single world to navigate and inspect it (a one-world run starts in this view):
 
@@ -47,6 +47,7 @@ The application currently targets D3D12 and selects the NVIDIA adapter. It uses 
 - `src/worms/benchmark.py` and `comparison_view.py`: frozen-reference competitions and history graph.
 - `src/worms/snapshots.py`: versioned, atomic save/restore and rolling checkpoints.
 - `src/worms/profile.py`: hardware GPU timestamps and CPU/throughput measurements.
+- `src/worms/throughput.py`: sustained throughput windows, trial restarts and render-off measurements.
 - `src/worms/sim.py`: simulation buffers, compute dispatches, and drawing a world into a rectangle, with optional camera offset and scale.
 - `src/worms/shaders/world.slang`: creature/world records, seeded initialization, and motion.
 - `src/worms/shaders/food.slang`: periodic Perlin density, seeded placement, and gradual food growth.
@@ -69,6 +70,8 @@ Each world has a fixed block of creature slots in one shared GPU buffer, with **
 One world unit is one metre. Worlds are **512 x 512 m**. A default creature's full body length averages **1 m**, with seeded variation from **0.8 to 1.2 m**; body width is 63% of its length. Body size is independent of population and world size. The 64-creature default is sparse: one creature per 4,096 square metres. At whole-world scale creatures are tiny specks; zoom in to inspect them at a useful scale.
 
 One update applies each creature's steering and throttle for 1/60 second and wraps both coordinates at the world boundaries. Maximum speed is initialized to 8–16 m/s and stored separately from actual velocity. Rendering reads the same GPU state, including copies at wrapping boundaries. Each frame runs `speed` simulation updates in a loop, then renders once; 100x means 100 updates per render. Windowed and headless runs use the same loop, defaulting to one update per frame. Pause freezes the simulation, Step advances exactly once regardless of speed and remains paused, and Reset restores the seed without an extra tick that frame. Reset keeps the selected speed.
+
+At higher speeds, updates are submitted in chunks of at most 25 ticks on the same GPU queue. Recording the next chunk overlaps execution of earlier work, with at most two submissions in flight. The final chunk shares the frame's draw submission. Settings, snapshots and trial transitions remain at refresh boundaries; a 100x refresh still draws only once.
 
 ## Food
 
@@ -145,6 +148,8 @@ History is stored at full angular and temporal resolution. The brain currently u
 
 Each creature has its own **64 → 16 → 2 feedforward MLP**, initialized with independent seeded Xavier-uniform weights and zero biases. Each creature's parameters remain fixed throughout its life; offspring inherit them with small mutations. Reset reproduces the initial population. Initial reactions to food and other creatures are arbitrary, with subsequent evolution driven by survival and reproduction.
 
+Network weights, activations and all inference arithmetic use native FP16, including input normalization, dot products, nonlinearities and output saturation. Observations convert from FP32 once at the input boundary. Initialization and mutation are separate from inference and retain FP32 arithmetic. Geometry, vision and integer energy/tick accounting retain their existing precision. At 1,024 creature slots, weights plus activations use 2.26 MiB per world instead of 4.52 MiB; retained vision history is still the largest allocation. On the saved 13M observations, the largest normalized control-output difference from FP32 was 0.00119; long-term trajectories can diverge.
+
 Inputs contain four values for each of the 16 vision segments, in segment order:
 
 | Channel | Network value |
@@ -183,6 +188,8 @@ The app saves a restorable checkpoint every **100,000 live ticks** under ignored
 
 Checkpoints include creature identities, ages and energy, food, world counters, all network weights and activations, complete vision history, spatial grids, settings and the exact tick. They also preserve whether the benchmark is still waiting, its capture threshold and actual reference tick, the frozen reference, in-progress trials, food-intake counters and graph results. Restoring a waiting run continues toward its original threshold; restoring after capture retains the exact reference and trial without recapturing. Older benchmark protocols are unsupported; start a new run for the new baseline policy. Camera and creature selection reset; the saved speed is retained. Files are compressed NPZ archives written through an atomic replacement, without pickle. Same-GPU continuation under the current rules is tested exactly; cross-driver bit-identical replay is not promised.
 
+Snapshot format 5 stores networks in FP16. Formats 1–4 migrate network buffers, including the frozen reference and active trial, when loaded; the source archive stays unchanged. The existing benchmark protocol check still applies. Quantizing a legacy network changes its future trajectory, so continuation across this precision change is not bit-identical. Nonfinite or out-of-range network values are rejected.
+
 ```powershell
 # Load a particular checkpoint instead of the most recent automatic file.
 .\.conda\python.exe -m worms --resume artifacts/snapshots/auto-<timestamp>-tick-<tick>.npz
@@ -203,8 +210,8 @@ Profile a checkpoint with hardware timestamps for every compute dispatch, CPU
 recording costs, and simulation throughput:
 
 ```powershell
-.\.conda\python.exe -m worms.profile --resume artifacts/performance/checkpoint-100000.npz --samples 20 --output artifacts/profile-comparison.json
-.\.conda\python.exe -m worms.profile --resume artifacts/performance/checkpoint-100000.npz --no-benchmark --samples 20 --output artifacts/profile-live.json
+.\.conda\python.exe -m worms.profile --resume checkpoints/13-million-ticks/snapshot.npz --warmup 2000 --samples 30 --output artifacts/profile-comparison.json
+.\.conda\python.exe -m worms.profile --resume checkpoints/13-million-ticks/snapshot.npz --no-benchmark --warmup 2000 --samples 30 --output artifacts/profile-live.json
 ```
 
 The saved benchmark runs by default; `--no-benchmark` measures the live world alone.
@@ -217,13 +224,31 @@ frame-boundary timestamps, while a separate replay gathers mean, median, p95 and
 maximum dispatch times. Omit `--resume` for a fresh scene, adding `--benchmark` to
 include the comparison pair.
 
-Atomic grids, sparse resolution, parallel lifecycle, retained shader objects and
-segment-parallel vision now run the 100,000-tick checkpoint at about 3,611 live
-ticks/s, or 1,661 ticks/s with the benchmark pair, on the RTX 3050 Ti Laptop GPU.
-These production runs are GPU-limited. With validation enabled in both versions,
-throughput improved 2.46× live-only and 2.69× with benchmarks over the original
-baseline. Brain evaluation and vision are now the largest GPU stages. The speed
-dropdown still means ticks per render, not a guaranteed real-time multiplier.
+For sustained evolution throughput, record three minutes at 100 steps per frame:
+
+```powershell
+.\.conda\python.exe -m worms.throughput --resume checkpoints/13-million-ticks/snapshot.npz --seconds 180 --interval 10 --steps-per-frame 100 --output artifacts/throughput-comparison.json
+.\.conda\python.exe -m worms.throughput --resume checkpoints/13-million-ticks/snapshot.npz --seconds 180 --no-benchmark --output artifacts/throughput-live.json
+.\.conda\python.exe -m worms.throughput --resume checkpoints/13-million-ticks/snapshot.npz --seconds 180 --no-benchmark --no-render --output artifacts/throughput-live-no-render.json
+```
+
+This capture includes trial restarts, timestamp reads and periodic population
+counters in elapsed throughput. It preserves the source checkpoint and disables
+automatic saves. JSON retains every frame, ten-second windows, CPU/GPU timings,
+world counters, trial transitions and source/runtime metadata. Drawing can be
+disabled during both warmup and measurement. By default this uses the application's
+bounded 25-step chunks, allowing CPU recording to overlap GPU execution, followed
+by one draw and a final wait per headless frame. Add `--synchronized` for the old
+single-command-buffer comparison, or `--chunk-size N` to vary the chunk size.
+GPU reports distinguish summed batch durations from the first-to-last timestamp
+span, which includes queue gaps. These headless rates exclude window presentation
+and checkpoint I/O; they are not window FPS.
+
+The 13-million-tick snapshot is the current repeatable reference. Historical
+100,000-tick results used a smaller population and older simulation rules; its
+benchmark protocol is no longer loadable by the current app. Brain evaluation
+and vision remain the largest named GPU stages. The speed dropdown means steps
+per rendered frame, not a guaranteed real-time multiplier.
 See [the performance report](docs/PERFORMANCE.md) for measurements and reproduction
 commands, and the [living optimization plan](docs/OPTIMIZATION_PLAN.md) for progress.
 

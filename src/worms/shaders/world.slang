@@ -55,7 +55,7 @@ public static const uint GRID_CELL_COUNT = GRID_SIZE * GRID_SIZE;
 RWStructuredBuffer<Creature> g_creatures;
 RWStructuredBuffer<World> g_worlds;
 RWStructuredBuffer<uint64_t> food_energy_totals;
-StructuredBuffer<float> brain_activations;
+StructuredBuffer<half> brain_activations;
 uint num_worlds;
 uint creatures_per_world;
 uint initial_creatures;

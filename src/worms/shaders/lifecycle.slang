@@ -4,8 +4,8 @@ import vision_types;
 
 RWStructuredBuffer<Creature> g_creatures;
 RWStructuredBuffer<World> g_worlds;
-RWStructuredBuffer<float> brain_weights;
-RWStructuredBuffer<float> brain_activations;
+RWStructuredBuffer<half> brain_weights;
+RWStructuredBuffer<half> brain_activations;
 RWStructuredBuffer<VisionSlot> vision_history;
 RWStructuredBuffer<VisionFrame> vision_frames;
 
@@ -117,7 +117,7 @@ void settle_lifecycle(uint3 thread_id : SV_DispatchThreadID)
             InterlockedAdd(g_worlds[world_index].deaths, 1u);
             // Brains were evaluated from the pre-resolution scene this tick.
             for (uint neuron = 0; neuron < BRAIN_ACTIVATIONS; ++neuron)
-                brain_activations[index * BRAIN_ACTIVATIONS + neuron] = 0.0;
+                brain_activations[index * BRAIN_ACTIVATIONS + neuron] = half(0);
         }
         else
         {
@@ -265,16 +265,16 @@ void initialize_newborns(uint3 group_id : SV_GroupID, uint lane : SV_GroupIndex)
         // Each lane owns this parameter: read the original once before replacing
         // its slot, so neither offspring can inherit the other's mutations.
         float inherited = brain_weights[action.parent_index * BRAIN_PARAMETERS + parameter];
-        brain_weights[action.parent_index * BRAIN_PARAMETERS + parameter] = mutation_enabled
-            ? mutate_weight(inherited, first_key, parameter) : inherited;
-        brain_weights[action.child_index * BRAIN_PARAMETERS + parameter] = mutation_enabled
-            ? mutate_weight(inherited, second_key, parameter) : inherited;
+        brain_weights[action.parent_index * BRAIN_PARAMETERS + parameter] = half(mutation_enabled
+            ? mutate_weight(inherited, first_key, parameter) : inherited);
+        brain_weights[action.child_index * BRAIN_PARAMETERS + parameter] = half(mutation_enabled
+            ? mutate_weight(inherited, second_key, parameter) : inherited);
     }
     // Neither offspring moves before its first observation and policy evaluation.
     for (uint neuron = lane; neuron < BRAIN_ACTIVATIONS; neuron += 64u)
     {
-        brain_activations[action.parent_index * BRAIN_ACTIVATIONS + neuron] = 0.0;
-        brain_activations[action.child_index * BRAIN_ACTIVATIONS + neuron] = 0.0;
+        brain_activations[action.parent_index * BRAIN_ACTIVATIONS + neuron] = half(0);
+        brain_activations[action.child_index * BRAIN_ACTIVATIONS + neuron] = half(0);
     }
 
     uint creature_count = num_worlds * creatures_per_world;

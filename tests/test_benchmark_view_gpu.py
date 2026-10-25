@@ -118,7 +118,7 @@ def test_benchmark_b_picking_inspection_follow_and_brain_use_local_world(app):
     assert app.population_stats["num_creatures"] == sim.inspect_world(1)["num_creatures"]
     assert app.population_stats["capacity"] == sim.creature_capacity
 
-    activations = sim.brain_activations.to_numpy().view(np.float32).reshape(-1, BRAIN_ACTIVATIONS)
+    activations = sim.brain_activations.to_numpy().view(np.float16).reshape(-1, BRAIN_ACTIVATIONS)
     activations[:] = 0
     activations[sim.creature_capacity] = 1
     sim.brain_activations.copy_from_numpy(activations)

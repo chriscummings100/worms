@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from tests.gpu_helpers import assert_sim_buffers_equal
+from tests.gpu_helpers import assert_sim_buffers_equal, legacy_neural_buffers
+from worms.benchmark import Benchmark
 from worms.sim import SHADER_DIR, Sim
 from worms.snapshots import (
     SIM_BUFFERS,
@@ -125,6 +126,49 @@ def test_checkpoint_includes_benchmark_worlds_frozen_arrays_and_graph(device, tm
     assert_same_state(trial, restored.extra_sims["benchmark"], continued=True)
 
 
+def test_version_four_migrates_live_trial_and_frozen_reference_without_recapture(device, tmp_path):
+    live = make_sim(device)
+    benchmark = Benchmark(live, warmup_ticks=0, sample_size=2, trial_ticks=20)
+    metadata, arrays = benchmark.snapshot_state()
+    path = save_snapshot(
+        tmp_path / "legacy-session.npz",
+        live,
+        extra_sims={"benchmark": benchmark.sim},
+        metadata={"benchmark": metadata},
+        arrays=arrays,
+    )
+    with np.load(path, allow_pickle=False) as source:
+        payload = {key: source[key] for key in source.files}
+    manifest = json.loads(str(payload["manifest"]))
+    manifest["version"] = 4
+    legacy_neural_buffers(payload, manifest)
+    keys = [entry["buffers"]["brain_weights"] for entry in manifest["sims"]]
+    keys.append(manifest["arrays"]["reference_weights"])
+    for index, key in enumerate(keys):
+        # Distinct FP32-only values prove every cohort converts its own bytes.
+        payload[key].view(np.float32)[0] = 0.1234567 + 0.1 * index
+    expected = [payload[key].view(np.float32).astype(np.float16) for key in keys]
+    payload["manifest"] = np.array(json.dumps(manifest))
+    np.savez_compressed(path, **payload)
+    source_bytes = path.read_bytes()
+
+    restored = load_snapshot(path, device)
+    resumed = Benchmark.from_snapshot(
+        restored.sim,
+        restored.extra_sims["benchmark"],
+        restored.metadata["benchmark"],
+        restored.arrays,
+    )
+    assert resumed.reference_tick == benchmark.reference_tick
+    assert resumed.trial == benchmark.trial and resumed.ready
+    for buffer, values in zip(
+        (restored.sim.brain_weights, resumed.sim.brain_weights, resumed.reference_weights), expected
+    ):
+        np.testing.assert_array_equal(buffer.to_numpy().view(np.float16).reshape(-1), values)
+    assert restored.metadata == {"benchmark": metadata}
+    assert path.read_bytes() == source_bytes
+
+
 def test_periodic_snapshots_keep_latest_files_and_leave_manual_checkpoint(device, tmp_path):
     sim = make_sim(device, num_worlds=1, creatures_per_world=1, creature_capacity=1)
     manual = save_snapshot(tmp_path / "manual.npz", sim)
@@ -166,6 +210,7 @@ def test_legacy_snapshot_restores_existing_state_with_zero_intake_counters(devic
         payload = {key: source[key] for key in source.files}
     manifest = json.loads(str(payload["manifest"]))
     manifest["version"] = 1
+    legacy_neural_buffers(payload, manifest)
     for entry in manifest["sims"]:
         del payload[entry["buffers"].pop("food_energy_totals")]
     payload["manifest"] = np.array(json.dumps(manifest))
@@ -182,7 +227,7 @@ def test_legacy_snapshot_restores_existing_state_with_zero_intake_counters(devic
             )
 
 
-@pytest.mark.parametrize("version", [2, 3])
+@pytest.mark.parametrize("version", [2, 3, 4])
 def test_previous_snapshot_versions_retain_live_state_and_intake_counters(
     device, tmp_path, version
 ):
@@ -196,6 +241,7 @@ def test_previous_snapshot_versions_retain_live_state_and_intake_counters(
         payload = {key: source[key] for key in source.files}
     manifest = json.loads(str(payload["manifest"]))
     manifest["version"] = version
+    legacy_neural_buffers(payload, manifest)
     payload["manifest"] = np.array(json.dumps(manifest))
     np.savez_compressed(path, **payload)
     restored = load_snapshot(path, device).sim
@@ -205,7 +251,7 @@ def test_previous_snapshot_versions_retain_live_state_and_intake_counters(
     assert_same_state(original, restored, continued=True)
 
 
-@pytest.mark.parametrize("version", [1, 2, 3])
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
 def test_snapshot_without_mutation_settings_keeps_legacy_probabilities(device, tmp_path, version):
     original = make_sim(
         device,
@@ -227,6 +273,7 @@ def test_snapshot_without_mutation_settings_keeps_legacy_probabilities(device, t
         payload = {key: source[key] for key in source.files}
     manifest = json.loads(str(payload["manifest"]))
     manifest["version"] = version
+    legacy_neural_buffers(payload, manifest)
     for entry in manifest["sims"]:
         del entry["settings"]["input_mutation_probability"]
         del entry["settings"]["policy_mutation_probability"]
@@ -292,6 +339,7 @@ def test_version_three_legacy_ids_remain_unique_when_restored_parents_split_into
         payload = {key: source[key] for key in source.files}
     manifest = json.loads(str(payload["manifest"]))
     manifest["version"] = 3
+    legacy_neural_buffers(payload, manifest)
     payload["manifest"] = np.array(json.dumps(manifest))
     np.savez_compressed(path, **payload)
 

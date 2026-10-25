@@ -64,11 +64,11 @@ def creature_cursor(sim):
 
 
 def weights(sim):
-    return sim.brain_weights.to_numpy().view(np.float32).reshape(-1, BRAIN_PARAMETERS)
+    return sim.brain_weights.to_numpy().view(np.float16).reshape(-1, BRAIN_PARAMETERS)
 
 
 def activations(sim):
-    return sim.brain_activations.to_numpy().view(np.float32).reshape(-1, BRAIN_ACTIVATIONS)
+    return sim.brain_activations.to_numpy().view(np.float16).reshape(-1, BRAIN_ACTIVATIONS)
 
 
 def evaluate(sim):
@@ -85,28 +85,69 @@ def capture(sim):
     sim.device.submit_command_buffer(encoder.finish())
 
 
-def reference(slots, parameters):
+def reference(slots, parameters, *, half_arithmetic=True):
     inputs = []
     for slot in slots:
         food = slot["kind"] == VISION_FOOD
         creature = slot["kind"] == VISION_CREATURE
         present = food or creature
+        if present and half_arithmetic:
+            distance, size = np.float16(slot["distance"]), np.float16(slot["size"])
+            proximity = np.clip(np.float16(1) - distance / np.float16(VISION_RANGE), 0, 1)
+            normalized_size = size / (size + np.float16(1))
+        elif present:
+            proximity = np.clip(1 - slot["distance"] / VISION_RANGE, 0, 1)
+            normalized_size = slot["size"] / (slot["size"] + 1)
+        else:
+            proximity = normalized_size = 0
         inputs.extend(
             (
-                np.clip(1 - slot["distance"] / VISION_RANGE, 0, 1) if present else 0,
-                slot["size"] / (slot["size"] + 1) if present else 0,
+                proximity,
+                normalized_size,
                 float(food),
                 float(creature),
             )
         )
-    inputs = np.array(inputs)
-    hidden = np.tanh(parameters[:1024].reshape(16, 64) @ inputs + parameters[1024:1040])
-    raw = parameters[1040:1072].reshape(2, 16) @ hidden + parameters[1072:1074]
-    return np.concatenate((inputs, hidden, [np.tanh(raw[0]), np.clip(0.5 + raw[1], 0, 1)]))
+    inputs = np.array(inputs, dtype=np.float32)
+    if not half_arithmetic:
+        parameters = parameters.astype(np.float32)
+        hidden = np.tanh(parameters[:1024].reshape(16, 64) @ inputs + parameters[1024:1040])
+        raw = parameters[1040:1072].reshape(2, 16) @ hidden + parameters[1072:1074]
+        return np.concatenate((inputs, hidden, [np.tanh(raw[0]), np.clip(0.5 + raw[1], 0, 1)]))
+    inputs = inputs.astype(np.float16)
+    parameters = parameters.astype(np.float16)
+
+    def dot_half(values, weights, bias):
+        # Reference every operation at half precision. A GPU may contract/reorder
+        # multiply-adds, so dense policies below use a bounded absolute error.
+        value = np.float16(bias)
+        for x, weight in zip(values, weights):
+            value = np.float16(value + np.float16(x * weight))
+        return value
+
+    hidden = np.array(
+        [
+            np.tanh(dot_half(inputs, row, bias))
+            for row, bias in zip(parameters[:1024].reshape(16, 64), parameters[1024:1040])
+        ],
+        dtype=np.float16,
+    )
+    raw = np.array(
+        [
+            dot_half(hidden, row, bias)
+            for row, bias in zip(parameters[1040:1072].reshape(2, 16), parameters[1072:1074])
+        ],
+        dtype=np.float16,
+    )
+    return np.concatenate(
+        (inputs, hidden, [np.tanh(raw[0]), np.clip(np.float16(0.5) + raw[1], 0, 1)])
+    ).astype(np.float16)
 
 
 def test_all_neurons_match_numpy_for_distinct_worlds_segments_and_missing_targets(app):
     sim = make_sim(app, worlds=2, creatures=3)
+    assert sim.brain_weights.size == 6 * BRAIN_PARAMETERS * np.dtype(np.float16).itemsize
+    assert sim.brain_activations.size == 6 * BRAIN_ACTIVATIONS * np.dtype(np.float16).itemsize
     layout = sim._capture_vision.reflection.vision_history.type_layout.element_type_layout
     slots = spy.BufferCursor(layout, sim.vision_history)
     for creature in range(6):
@@ -132,7 +173,14 @@ def test_all_neurons_match_numpy_for_distinct_worlds_segments_and_missing_target
         world, local = divmod(index, 3)
         observation = sim.inspect_vision(world, local)
         expected = reference(observation["slots"], parameters[index])
-        np.testing.assert_allclose(actual[index], expected, rtol=2e-5, atol=2e-6)
+        # Half division may become reciprocal multiplication / fused subtraction.
+        # Allow one FP16 step near 1; presence flags and missing inputs stay exact below.
+        np.testing.assert_allclose(actual[index, :64], expected[:64], rtol=0, atol=2**-11)
+        np.testing.assert_allclose(actual[index, 64:], expected[64:], rtol=0, atol=0.002)
+        # Independently bound accuracy against the original FP32 network, not
+        # just the quantized reference. Controls and hidden units are normalized.
+        full = reference(observation["slots"], parameters[index], half_arithmetic=False)
+        np.testing.assert_allclose(actual[index, 64:], full[64:], rtol=0, atol=0.003)
         segments = actual[index, :64].reshape(VISION_SLOTS, 4)
         for segment, slot in enumerate(observation["slots"]):
             kind = slot["kind"]
@@ -157,14 +205,36 @@ def test_all_neurons_match_numpy_for_distinct_worlds_segments_and_missing_target
     np.testing.assert_array_equal(activations(sim), actual)
 
 
+def test_half_accumulation_rounds_the_running_sum_before_the_next_add(app):
+    sim = make_sim(app)
+    layout = sim._capture_vision.reflection.vision_history.type_layout.element_type_layout
+    slots = spy.BufferCursor(layout, sim.vision_history)
+    for segment in range(VISION_SLOTS):
+        slots[segment]["kind"] = VISION_FOOD
+        slots[segment]["distance"] = 12.0
+        slots[segment]["size"] = 1.0
+    slots.apply()
+    parameters = np.zeros((1, BRAIN_PARAMETERS), dtype=np.float16)
+    # All three food flags are exactly one. Native FP16 accumulation rounds
+    # away 0.125 between +/-10000; this verifies actual half arithmetic.
+    parameters[0, [2, 6, 10]] = (10000, 0.125, -10000)
+    parameters[0, 1040] = 1
+    sim.brain_weights.copy_from_numpy(parameters)
+    evaluate(sim)
+    actual = activations(sim)[0]
+    assert actual[64] == 0
+    assert actual[80] == 0
+    assert actual[81] == 0.5
+
+
 def test_seeded_weights_are_independent_stable_by_identity_and_fixed_between_ticks(app):
     sim = make_sim(app, worlds=2, creatures=3, food=32)
     original = weights(sim).copy()
     assert np.isfinite(original).all()
     np.testing.assert_array_equal(original[:, 1024:1040], 0)
     np.testing.assert_array_equal(original[:, 1072:1074], 0)
-    assert np.abs(original[:, :1024]).max() <= math.sqrt(6 / 80)
-    assert np.abs(original[:, 1040:1072]).max() <= math.sqrt(6 / 18)
+    assert np.abs(original[:, :1024]).max() <= np.float16(math.sqrt(6 / 80))
+    assert np.abs(original[:, 1040:1072]).max() <= np.float16(math.sqrt(6 / 18))
     assert len({row.tobytes() for row in original}) == 6
 
     larger = make_sim(app, worlds=3, creatures=5)
@@ -289,14 +359,16 @@ def test_current_vision_drives_the_next_step_and_old_history_remains_raw(app):
     food[0]["position"] = spy.float2(108, 100)
     food[0]["energy"] = FOOD_ENERGY
     food.apply()
-    parameters = np.zeros((1, BRAIN_PARAMETERS), dtype=np.float32)
+    parameters = np.zeros((1, BRAIN_PARAMETERS), dtype=np.float16)
     parameters[0, 8 * 4] = 1  # Forward food proximity -> first hidden neuron.
     parameters[0, 1040] = 1  # First hidden neuron -> steering.
     sim.brain_weights.copy_from_numpy(parameters)
     capture(sim)
     observed = sim.inspect_vision(0, 0)
     command = sim.inspect_brain(0, 0)["steering"]
-    assert command == pytest.approx(math.tanh(math.tanh(1 - 8 / 24)), rel=2e-5, abs=2e-6)
+    expected_input = np.float16(1 - 8 / 24)
+    expected_hidden = np.float16(math.tanh(float(expected_input)))
+    assert command == float(np.float16(math.tanh(float(expected_hidden))))
 
     food[0]["position"] = spy.float2(92, 100)
     food.apply()

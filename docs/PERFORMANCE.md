@@ -12,8 +12,357 @@ New profile JSON includes `gpu_validation`; compare like modes. Shader-object
 reuse and validation overhead are tracked in the optimization plan.
 
 The [optimization plan and execution log](OPTIMIZATION_PLAN.md) tracks the agreed
-changes and their validation. The 100,000-tick measurements below are the retained
-pre-optimization baseline; milestone results are recorded separately.
+changes and their validation. The 13-million-tick snapshot is the current
+repeatable reference. Historical 100,000-tick measurements below use an older
+benchmark protocol that the current application rejects; they are retained as
+historical context, not directly comparable regression measurements.
+
+## All-half inference follow-up — 25 October 2026
+
+Inference now stays FP16 through input normalization, both dot products, `tanh`
+and output saturation. Distance and size convert from FP32 at the observation
+boundary. Initialization and mutation are outside inference and retain FP32.
+Offline compilation of `evaluate_brains` reports **zero half-to-float conversions,
+zero FP32 arithmetic operations and zero FP32 intrinsic calls**. The only two
+static narrowing sites read observation distance/size. This checks DXIL types,
+not the driver's internal implementation of transcendental operations.
+
+A controlled one-device test interleaves three precision variants on identical,
+unchanging 13M observations. It uses 20 warmup and 20 measured rounds, rotating
+and reversing case order; each scope contains 128 inference calls and two GPU
+timestamps. The FP32 variant widens the same quantized weights into FP32 buffers.
+There are 345 valid live observations and 788 across the comparison worlds.
+
+| Inference variant | Live GPU µs/call | Pair GPU µs/call |
+|---|---:|---:|
+| Previous half dots, FP32 normalization/activations | 47.14 | 97.43 |
+| **All-half inference, adopted** | **48.98** | **100.87** |
+| All-FP32 | 86.60 | 112.80 |
+
+Removing the remaining FP32 operations is 3.9% / 3.5% slower in this controlled
+test, while all-half remains 43.4% / 10.6% faster than all-FP32. Consistent types
+do not by themselves guarantee a further speedup. These frozen-kernel timings
+are not whole-simulation throughput or comparable to per-dispatch instrumented
+times below. Separate-process trials had substantial live-kernel variance and
+are retained as diagnostics, not used for the comparison above.
+
+GPU results against the original saved FP32 activations have maximum normalized
+control error 0.001025 live / 0.001182 pair, with means 0.000256 / 0.000241.
+The source checkpoint is unchanged. Validation: 97 CPU tests and 21 distinct
+targeted GPU cases passed, covering all neural tests, chunk equivalence, trial
+handoffs and checkpoint continuation; Ruff lint/format checks pass. The NumPy
+input reference permits one FP16 step near 1 because the compiler substitutes
+an FP16 reciprocal for division by 24 and may contract operations.
+
+Artifacts: `artifacts/performance/2026-10-25-all-half/` contains the before source,
+`brain-all-half.dxil.txt`, `ir-verification.json`, `interleaved.json`,
+`compare_interleaved.py`, accuracy/timing reports and their reproduction scripts.
+The earlier window, sustained and Nsight results below describe the preceding
+half-dot/FP32-activation implementation; they have not been relabeled as new runs.
+
+## Bounded chunks and FP16 inference — 25 October 2026
+
+Windowed and headless refreshes now submit simulation chunks of at most 25 ticks
+on the same graphics queue, recording subsequent chunks while earlier work runs.
+At high speed, two submission slots bound transient command resources; the last
+chunk shares the refresh's draw. Settings, trial handoffs and snapshots stay at
+refresh boundaries. The window still uses SlangPy's presentation and normal
+population polling. Speed choices now include 200, 500 and 1,000 ticks/refresh.
+
+Neural weights, stored activations, local activations and dot products use native
+FP16. Vision normalization, nonlinearities and mutation arithmetic use FP32;
+geometry, retained vision, energy and tick/identity counters keep their existing
+precision. Checkpoint format 5 converts legacy network buffers, including frozen
+references, without modifying the source archive. Quantization changes future
+trajectories; it is not bit-identical continuation of the old FP32 policy.
+
+### Actual window throughput
+
+Two independent restores per case, 2,000 warmup ticks and 10,000 measured ticks
+per restore, reversing workload order on the second repeat. These runs call the
+real `window_app.run_frame()` with vsync, UI and normal population polling, then
+drain the device before ending the elapsed interval. Autosaves and GPU validation
+are off. The table reports the median of two rates, not a sustained-hour forecast.
+
+| Workload | Previous FP32, 100 steps/refresh | New FP16 + chunks, 100 steps/refresh | New FP16 + chunks, 1,000 steps/refresh |
+|---|---:|---:|---:|
+| Live + comparison pair | 1,710 steps/s | **2,128 steps/s (+24.4%)** | **2,529 steps/s** |
+| Live only | 1,880 steps/s | 1,766 steps/s (−6.0%) | **6,204 steps/s** |
+
+The 1,000-step live-only rate is about 103× real time; comparisons reach 42×.
+The old monolithic 1,000-step case failed a D3D12 descriptor allocation assertion,
+so there is no valid old rate at that setting. Chunking bounds the transient
+allocations and lets the larger refresh batches run.
+
+Live-only window performance at 100 steps did not improve. Final headless runs
+at that setting reached 4,944 steps/s live-only and 2,101 with comparisons, so
+the small-window-batch result has substantial cost outside simulation work.
+Presentation and polling remain in the window measurements; their individual
+contributions have not been isolated. Do not describe the result as a universal
+100-step window speedup. Increasing steps per refresh amortizes that overhead.
+
+With identical chunk scheduling, FP32 headless runs reached 4,133 / 1,998
+steps/s live / combined, versus the final 4,944 / 2,101. Desktop CPU variation
+and diverging quantized trajectories limit attribution; the fixed-input accuracy
+check and boundary/dispatch shader profiles below provide separate evidence.
+Raw runs: `fp32-sync-window.json`, `final-chunk-window.json`,
+`final-chunk-headless.json`, `fp32-chunk-headless.json`; medians and ranges are
+in `comparison-summary.json` beside `measure_run.py`.
+
+### Matching Nsight window captures
+
+Both captures use the final FP16 implementation, 100 steps/refresh, 100 measured
+frames, the same checkpoint/warmup and normal UI/polling. Only chunk scheduling
+changes. NVTX `worms.capture` includes the final device drain. DX12 workload
+intervals are clipped to that range and unioned, avoiding overlap double counts.
+
+| Metric | Single command buffer | 25-step chunks |
+|---|---:|---:|
+| Instrumented completed steps/s | 1,784 | 2,135 (+19.7%) |
+| Capture elapsed | 5.605 s | 4.684 s |
+| Unioned GPU workload duration | 3.869 s | 3.863 s |
+| GPU timeline coverage | 69.0% | 82.5% |
+| Uncovered timeline | 1.737 s | 0.820 s (−52.8%) |
+| Recording CPU time / frame | 14.71 ms | 14.87 ms |
+| Frame p95 | 103.8 ms | 63.6 ms |
+
+This directly supports overlap as the improvement: GPU work and recording time
+are almost unchanged, while exposed gaps shrink. Timeline coverage is not SM
+occupancy. The chunked `update` NVTX scope is longer because it now contains
+intermediate submission and bounded GPU waits; it is no longer pure preparation.
+No separate `finish` scope was recorded in these window captures.
+
+Open `worms-window-100steps-chunked.nsys-rep` in Nsight Systems for the new path,
+or `worms-window-100steps-synchronized.nsys-rep` for the matched control. Both
+export successfully to SQLite and pass integrity checks. Analysis and script:
+`nsight-window-analysis.json`, `analyze-window-captures.py` in the artifact folder
+above. These instrumented rates are separate from uninstrumented window rates.
+
+### Sustained 1,000-step validation
+
+A final 60.41-second headless run advanced **151,000 live and paired ticks** at
+**2,499.8 steps/s**, including one completed trial and restart. Ten-second windows
+ranged from 2,449.8 to 2,546.5 steps/s. The live population ended at 363, and the
+two trial populations at 294/293. GPU validation and autosaves were disabled;
+small counter reads, timestamp queries and trial setup remain in elapsed time.
+
+The median frame took 397.82 ms. Its summed GPU scopes took 387.04 ms, with a
+first-to-last scope span of 387.77 ms: **only 0.74 ms median between scopes**.
+Across the run, scoped GPU time occupied **99.75% of that span** and 97.46% of
+measured frame wall time. Scope gaps include unmeasured boundary operations, not
+only idle time; this establishes a nearly continuous command timeline inside
+each 1,000-step refresh, not hardware occupancy. CPU record/finish/submit medians
+were 149.81/63.18/5.37 ms, overlapping GPU execution rather than adding to it.
+
+Each frame used 40 simulation chunks plus one render scope, with the last chunk
+and render sharing a submission. No descriptor-allocation failures occurred.
+Warmup also used 1,000-step frames, so the first measured trial starts at tick
+1,000 instead of tick 1,500 in the short tests that warm up in 100-step frames.
+The source checkpoint hash remains unchanged. Report:
+`final-sustained-1000.json` in the artifact folder above.
+
+```powershell
+.\.conda\python.exe -m worms.throughput --resume checkpoints/13-million-ticks/snapshot.npz --seconds 60 --interval 10 --steps-per-frame 1000 --warmup 2000 --output artifacts/throughput-1000.json
+```
+
+Final validation: **289 tests passed (97 CPU, 192 GPU)**, including native half
+accuracy, mutation/inheritance, legacy migrations, checkpoint continuation,
+chunk ordering, trial boundaries, rendering and timing accounting. The 15 brain
+tests ran separately; the remaining 274 passed in 319.75 seconds. Ruff lint and
+formatting checks passed. `after-source.zip` and `manifest.json` preserve sources
+and hashes; `final-regression.log` records the 274-test run.
+
+### Precision experiments
+
+Same saved 13M reference, 2,000 warmup ticks, ten measured 100-step frames with
+comparisons, production validation disabled. Per-dispatch GPU timings come from
+a separate replay and include timestamp overhead; whole-frame GPU timings use
+two boundary queries. This retains single-buffer submission to isolate shader
+changes from chunk scheduling.
+
+| Inference | Brain live / pair, µs per dispatch | Boundary GPU ms / 100 steps |
+|---|---:|---:|
+| Original FP32 | 105.0 / 99.7 | 39.71 |
+| FP16 storage, FP32 dot products (rejected) | 145.3 / 142.0 | 47.70 |
+| Paired FP16 loads, FP32 dot products (rejected) | 202.6 / 199.8 | 59.33 |
+| **Native FP16 dot products (adopted)** | **97.8 / 92.2** | **38.21** |
+
+Scalar half storage alone adds a conversion on every weight read. Offline DXIL
+inspection confirms the adopted implementation uses native half multiply/add
+and avoids those per-weight conversions. It reduces brain dispatch time by
+about 7–8%, and complete-session GPU time by 3.8% in this short replay. This is
+not tensor-core execution.
+
+An independent GPU evaluation of the snapshot's 345 valid live observations and
+788 trial observations found maximum normalized control differences of 0.000993
+and 0.001213 from FP32, with means near 0.0002. These are fixed-input checks,
+not a claim about long-term evolutionary equivalence. Network allocations for
+the live world, pair and frozen reference fall from 18,604,032 to 9,302,016 bytes
+(17.74 to 8.87 MiB). Vision history remains much larger.
+
+Artifacts are under ignored `artifacts/performance/2026-10-25-pipeline-half/`:
+`profile-{fp32,half,packed-half-select,compute-half}.json`,
+`accuracy-compute-half.json`, corresponding scripts, compiler dumps and isolated
+source copies. Rejected variants are retained as experiments only.
+
+## Before chunking: 13M reference, sustained 100-step capture — 25 October 2026
+
+Reference: `checkpoints/13-million-ticks/snapshot.npz`, SHA-256
+`378bca806376c52c1905872668148a47d3f357381089a2df512978a0cb49d8b1`.
+The snapshot is unchanged. Simulation source is revision `d1352e6`; this capture
+adds a sustained measurement utility without changing simulation or rendering.
+Python 3.12.15, SlangPy 0.43.1, NVIDIA driver 596.08, RTX 3050 Ti Laptop GPU,
+D3D12, production validation disabled, 1280 × 720 when drawing.
+
+Each workload independently restores the same saved state, warms up 2,000 ticks,
+then runs for 180 seconds with 100 live ticks per frame and ten-second summaries.
+Runs are sequential: complete session, live-only, then live-only without drawing.
+All start at live tick 13,002,000 with 347 living creatures; the comparison pair
+has just restarted and contains 128 creatures per world. Capacities are 1,024
+creatures and 8,192 food slots per world. All saved settings/seeds are retained.
+
+| Workload | Live steps/s | Simulated / wall time | CPU preparation median ms/frame | GPU median ms/frame | Frame p50 / p95 ms | Live ticks measured |
+|---|---:|---:|---:|---:|---:|---:|
+| Live + comparison pair | **1,527.8** | **25.46×** | 16.85 | 41.32 | 58.99 / 93.40 | 275,100 |
+| Live only | **2,704.5** | **45.08×** | 12.07 | 19.66 | 32.09 / 53.13 | 486,900 |
+| Live only, drawing off | **2,455.8** | **40.93×** | 20.67 | 19.50 | 40.50 / 54.19 | 442,100 |
+
+These are end-to-end synchronized headless rates, including query reads,
+periodic small counter readbacks, benchmark completion and trial setup. Loading,
+warmup, autosaves, final JSON serialization, native UI, vsync and presentation are
+excluded. The GPU timestamps cover the main frame command buffer; separately
+submitted trial setup is included in wall time. CPU preparation includes any
+blocking readbacks in `App.update`, and is not pure CPU execution time. One
+submission is retired before recording the next frame, as in `App.frame`.
+
+### What changed during the three minutes
+
+| Workload | First ~30s steps/s | Last ~30s steps/s | Ten-second range | End live population |
+|---|---:|---:|---:|---:|
+| Live + comparison pair | 1,530 | 1,490 | 1,099–1,777 | 352 |
+| Live only | 3,660 | 2,184 | 1,236–3,686 | 366 |
+| Live only, drawing off | 2,303 | 3,465 | 1,369–3,740 | 357 |
+
+The dominant variation is in CPU preparation, not a consistent increase in GPU
+cost. Live-only GPU window medians stay approximately 19.5–20.0 ms, while CPU
+preparation grows from about 7 ms to 24 ms; drawing-off later recovers to 6.7 ms
+CPU preparation and 3,740 steps/s. These sequential observations do **not** show
+that disabling rendering makes the simulation slower. They also do not isolate
+thermal effects or establish a clean regression: the desktop was active and a
+process sample recorded other CPU consumers, including Windows compatibility
+telemetry and the editor. The reports retain all stalls, including maximum
+frames of 1.86 s combined and 0.91 s live-only. The specific cause of those stalls
+is not established by wall-clock timing alone.
+
+The full session completes two measured trial restarts. Their whole-frame costs
+are 65.3 and 58.8 ms, not the long-tail stalls above. Comparison worlds end with
+355 and 350 creatures. GPU temperatures span 65–74°C combined, 60–65°C live-only,
+and 60–65°C with drawing off. Device-wide busy-time means are 63.6%, 52.6% and
+47.4%, respectively. Graphics clocks occasionally fall during idle periods;
+recorded active clock-event masks are zero or the GPU-idle bit. No thermal
+clock-event flag is observed. Busy time is not hardware occupancy.
+
+At these measured averages, one million live steps takes about **10.9 minutes
+with comparisons** or **6.2 minutes live-only**. The speed setting of 100 means
+steps per rendered frame; 100× real-time simulation at 60 ticks/s would require
+6,000 live steps/s. The current headless loop leaves CPU preparation and GPU
+execution mostly sequential, so both remain useful optimization targets.
+
+### Every dispatch in the current full session
+
+A separate short profile restores the same reference, warms up 2,000 ticks and
+measures 30 frames / 3,000 live steps, then replays for detailed attribution.
+It achieves 1,631.6 live steps/s with comparisons and 3,246.2 live-only in the
+boundary-only captures. Full-session CPU preparation is 21.07 ms/frame and GPU
+time is 39.86 ms/frame. Short and sustained rates use different measurement
+windows and must not be substituted for one another.
+
+Below, GPU timings are microseconds per dispatch. Each comparison dispatch
+processes both comparison worlds together. CPU entries are mean recording times
+for live / paired calls, excluding the profiler's timestamp writes.
+
+| Dispatch | Live GPU mean / p95 µs | Pair GPU mean / p95 µs | CPU live / pair µs | Combined detailed GPU share |
+|---|---:|---:|---:|---:|
+| evaluate_brains | 105.1 / 106.5 | 99.9 / 101.4 | 3.9 / 3.9 | 31.5% |
+| capture_vision | 53.6 / 55.3 | 52.1 / 55.3 | 4.4 / 4.2 | 16.3% |
+| detect_food_contacts | 11.8 / 12.3 | 12.7 / 14.3 | 5.4 / 5.3 | 3.8% |
+| clear_grid | 9.6 / 10.2 | 10.9 / 11.3 | 4.8 / 4.7 | 3.1% |
+| build_food_grid | 9.4 / 10.2 | 9.0 / 10.2 | 3.9 / 3.8 | 2.8% |
+| step | 9.6 / 10.2 | 8.5 / 10.2 | 3.2 / 2.9 | 2.8% |
+| settle_lifecycle | 9.4 / 10.2 | 8.5 / 10.2 | 4.9 / 4.9 | 2.7% |
+| initialize_newborns | 8.6 / 9.2 | 8.4 / 9.2 | 4.6 / 4.5 | 2.6% |
+| build_grid | 8.8 / 9.2 | 7.8 / 9.2 | 6.5 / 4.5 | 2.6% |
+| apply_food | 8.1 / 9.2 | 7.3 / 8.2 | 5.9 / 5.8 | 2.4% |
+| resolve_food_contacts | 7.1 / 9.2 | 8.3 / 10.2 | 4.2 / 4.2 | 2.4% |
+| clear_food_grid | 6.8 / 7.2 | 8.4 / 9.2 | 4.0 / 3.9 | 2.3% |
+| clear_food_contacts | 6.8 / 7.2 | 7.9 / 8.2 | 4.8 / 4.8 | 2.3% |
+| clear_lifecycle | 6.8 / 7.2 | 7.9 / 8.2 | 4.2 / 4.2 | 2.3% |
+| resolve_lifecycle | 6.4 / 7.2 | 7.5 / 8.2 | 4.7 / 4.8 | 2.1% |
+| grow_food (every six ticks) | 13.1 / 24.6 | 16.6 / 29.7 | 4.1 / 3.9 | 0.8% |
+
+Rendering is once per 100 ticks: **111.5 µs mean / 112.6 µs p95 per frame**,
+0.17% of detailed GPU time. Time outside named dispatch/render scopes is 17.2%.
+Each full-session frame records about 3,033 compute dispatches. Brain evaluation
+and vision together are 47.8% of detailed GPU time; reducing small-dispatch and
+CPU preparation overhead remains relevant alongside optimizing those kernels.
+
+Detailed queries inflate the GPU frame from about 39.9 to 65.1 ms (**1.63×**).
+These instrumented shares identify hotspots; they cannot be added up to predict
+uninstrumented savings. The detailed capture covers the beginning of the run,
+not every ten-second window. Late-run per-dispatch behavior remains unmeasured.
+
+### Reproduction and files
+
+These commands select the original submission pattern. Reproducing the exact
+FP32 implementation also requires the archived source; current shaders use
+FP16 neural inference. Without `--synchronized`, the current utility measures
+bounded chunks instead.
+
+```powershell
+.\.conda\python.exe -m worms.throughput --resume checkpoints/13-million-ticks/snapshot.npz --seconds 180 --interval 10 --steps-per-frame 100 --warmup 2000 --synchronized --output artifacts/throughput-comparison.json
+.\.conda\python.exe -m worms.throughput --resume checkpoints/13-million-ticks/snapshot.npz --seconds 180 --synchronized --no-benchmark --output artifacts/throughput-live.json
+.\.conda\python.exe -m worms.throughput --resume checkpoints/13-million-ticks/snapshot.npz --seconds 180 --synchronized --no-benchmark --no-render --output artifacts/throughput-live-no-render.json
+```
+
+Raw data is in ignored `artifacts/performance/2026-10-25-13m/`: `sustained-*.json`,
+`profile-{comparison,live}.json`, `summary.json`, `telemetry.json`, and
+`host-process-sample.json`. The complete chart is `throughput.png` / `throughput.svg`.
+`capture.py` reproduces sequential runs and device telemetry; `analyze.py` rebuilds
+the summary and figure. Plotting dependencies are isolated under ignored
+`artifacts/performance/plot-deps/` and are not application dependencies.
+
+### Nsight Systems viewer capture
+
+Open `artifacts/performance/2026-10-25-13m/worms-13m-100steps-batch.nsys-rep`
+in Nsight Systems using File → Open. Installed collector/viewer: 2023.1.2.43.
+The capture includes restore and 2,000 warmup ticks, then 30 labeled frames of
+100 steps each with the comparison pair enabled. Find the `worms.capture` NVTX
+range (1.804 seconds) for the warmed section. Nested ranges label update, draw,
+command-buffer finish, submission and GPU wait.
+
+The native report was successfully exported to SQLite and verified: 850 D3D12
+CPU API records, 89 GPU `ExecuteCommandLists` batch records, and 211 NVTX ranges,
+including all 30 labeled frames. `nsight-session-metadata.json` preserves the
+snapshot hash and exact tick counts; `nsight-validation.json` records the exported
+table counts. `nsight_capture.py` is the reproduction target. This trace is
+instrumented and is separate from the sustained throughput measurements.
+
+The successful command uses `--trace=dx12,dx12-annotations,nvtx`,
+`--dx12-gpu-workload=batch`, `--dx12-wait-calls=true`, `--sample=none`,
+`--cpuctxsw=none`, `--gpu-metrics-device=none`, and `--python-sampling=false`,
+with natural application exit. The first attempt with WDDM and NVTX capture
+gating crashed the collector (`0xc0000005`) and produced an invalid partial
+stream. The successful retry omits both. A second valid report requested
+`--dx12-gpu-workload=individual`, but its export still contains 89 batch records,
+not individual GPU dispatch events. Do not describe that report as per-kernel
+GPU timing. Use the named-dispatch timestamp JSON above for those measurements.
+CPU sampling, scheduling/context switches and hardware occupancy are absent.
+
+Validation: 66 CPU tests passed; the two new sustained-profiler GPU tests and
+six existing profile GPU tests passed (8 total, 45.55 seconds). These verify
+trial caps/restarts, actual benchmark tick counts, render-off warmup, suspended
+automatic saves and unchanged source checkpoints. Ruff check/format and Git
+whitespace checks passed. No simulation behavior was changed.
 
 ## Profile a checkpoint
 
@@ -21,8 +370,8 @@ These commands compare the complete session with the live world alone, starting
 from the same checkpoint:
 
 ```powershell
-.\.conda\python.exe -m worms.profile --gpu-debug --resume artifacts/performance/checkpoint-100000.npz --steps-per-frame 100 --warmup 200 --samples 20 --output artifacts/performance/profile-session.json
-.\.conda\python.exe -m worms.profile --gpu-debug --resume artifacts/performance/checkpoint-100000.npz --no-benchmark --steps-per-frame 100 --warmup 200 --samples 20 --output artifacts/performance/profile-live.json
+.\.conda\python.exe -m worms.profile --resume checkpoints/13-million-ticks/snapshot.npz --steps-per-frame 100 --warmup 2000 --samples 30 --output artifacts/performance/profile-session.json
+.\.conda\python.exe -m worms.profile --resume checkpoints/13-million-ticks/snapshot.npz --no-benchmark --steps-per-frame 100 --warmup 2000 --samples 30 --output artifacts/performance/profile-live.json
 ```
 
 `--resume PATH` preserves saved settings, brains, reference population, and the

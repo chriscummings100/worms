@@ -2,6 +2,7 @@
 
 import argparse
 import math
+from contextlib import nullcontext
 from pathlib import Path
 from time import monotonic
 
@@ -14,8 +15,10 @@ from worms.camera import Camera
 from worms.comparison_view import ComparisonView, comparison_result
 from worms.sim import ENERGY_PER_UNIT, WORLD_SIZE, Sim
 from worms.snapshots import PeriodicSnapshots, load_snapshot, save_snapshot
+from worms.submissions import BoundedSubmissions, chunk_timings
 
-SIM_SPEEDS = (1, 2, 5, 10, 20, 50, 100)
+SIM_SPEEDS = (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000)
+SIM_CHUNK_STEPS = 25
 
 
 def world_views(width, height, num_worlds, selected_world=None):
@@ -68,6 +71,7 @@ class App:
             enable_rhi_validation=debug_gpu,
             compiler_options={"include_paths": [Path(__file__).parent / "shaders"]},
         )
+        self._chunk_submissions = BoundedSubmissions(self.device)
         self.sim = Sim(
             self.device, num_worlds, creatures_per_world, creature_capacity=creature_capacity
         )
@@ -407,7 +411,8 @@ class App:
             return True
         return False
 
-    def update(self, encoder):
+    def _prepare_update(self):
+        """Apply refresh-boundary operations before recording any new ticks."""
         # Checkpoint/benchmark readbacks only see work submitted by the previous
         # frame. Never read back a state whose updates are still in this encoder.
         if self._restore_requested:
@@ -427,7 +432,6 @@ class App:
         ):
             self.snapshot()
         self._snapshot_requested = False
-        self.sim.apply_settings(encoder)
         # Poll small inspector/counter records before recording the next update.
         if self.selected_creature is not None and monotonic() >= self._next_stats_update:
             self.refresh_stats()
@@ -437,13 +441,74 @@ class App:
             and monotonic() >= self._next_population_update
         ):
             self.refresh_population()
-        if not reset and (self._step or not self.paused):
-            for _ in range(1 if self._step else self.speed):
-                self.sim.update(encoder)
-                if self.benchmark is not None:
-                    self.benchmark.update(encoder)
+        return (
+            (1 if self._step else self.speed)
+            if not reset and (self._step or not self.paused)
+            else 0
+        )
+
+    def _record_steps(self, encoder, steps):
+        # The first chunk applies dirty settings before its first tick. This
+        # also records settings while paused, when there are no simulation ticks.
+        self.sim.apply_settings(encoder)
+        for _ in range(steps):
+            self.sim.update(encoder)
+            if self.benchmark is not None:
+                self.benchmark.update(encoder)
+
+    def _finish_update(self):
         self._reset = self._step = False
         self.frame_count += 1
+
+    def update(self, encoder):
+        """Record a whole refresh in one caller-owned encoder, without submitting."""
+        self._record_steps(encoder, self._prepare_update())
+        self._finish_update()
+
+    def update_for_frame(
+        self,
+        final_encoder,
+        *,
+        chunk_size=SIM_CHUNK_STEPS,
+        max_in_flight=2,
+        chunk_scope=None,
+    ):
+        """Submit bounded simulation chunks, leaving the final chunk for drawing.
+
+        All submissions use the default graphics queue and the same GPU state.
+        CPU recording of the next chunk overlaps execution of submitted chunks.
+        The caller owns the final encoder and must submit it before calling
+        again. The window SDK owns its submission/presentation; headless callers
+        wait for their final submission before starting another refresh.
+
+        ``chunk_scope(encoder)`` optionally supplies a context manager for each
+        chunk's GPU timestamps. Returned costs cover intermediate submissions;
+        detailed CPU timing is collected only when this hook is provided.
+        """
+        if not isinstance(chunk_size, int) or chunk_size < 1:
+            raise ValueError("chunk_size must be a positive integer")
+        if not isinstance(max_in_flight, int) or max_in_flight < 2:
+            raise ValueError("max_in_flight must be at least two")
+        stats = chunk_timings()
+        submissions = self._chunk_submissions
+        measure = chunk_scope is not None
+        submissions.begin_frame(stats, previous_final=self.window is not None, measure=measure)
+        steps = self._prepare_update()
+        while steps > chunk_size:
+            encoder = self.device.create_command_encoder()
+            with chunk_scope(encoder) if measure else nullcontext():
+                self._record_steps(encoder, chunk_size)
+            stats["chunks"] += 1
+            submissions.submit(encoder, max_in_flight, stats, measure=measure)
+            steps -= chunk_size
+        with chunk_scope(final_encoder) if measure else nullcontext():
+            self._record_steps(final_encoder, steps)
+        stats["chunks"] += 1
+        # Reserve the final slot only after recording it: the CPU remains free
+        # to prepare its commands while the GPU executes the previous chunk.
+        submissions.make_room(max_in_flight, stats, measure=measure)
+        self._finish_update()
+        return stats
 
     def render(self, encoder):
         sim = self.view_sim
@@ -501,12 +566,13 @@ class App:
     def frame(self):
         """Submit one headless frame using the same update and render as the window."""
         encoder = self.device.create_command_encoder()
-        self.update(encoder)
+        self.update_for_frame(encoder)
         self.render(encoder)
         submission = self.device.submit_command_buffer(encoder.finish())
         # Headless frames have no swapchain to bound work in flight. Retire each
         # frame before recording more transient D3D12 descriptors at high speed.
         self.device.wait_for_submit(submission)
+        self._chunk_submissions.retire_finished()
 
     def run(self, frames=None):
         if self.window_app is not None:
@@ -695,7 +761,7 @@ class _Window(spy.AppWindow):
             available_height = max(1, limit - panel.position.y - 8)
             if panel.size.y > available_height:
                 panel.size = spy.float2(panel.size.x, available_height)
-        app.update(context.command_encoder)
+        app.update_for_frame(context.command_encoder)
         app.render(context.command_encoder)
         context.command_encoder.blit(context.surface_texture, app.texture)
         self.speed_selector.value = 0 if app.paused else SIM_SPEEDS.index(app.speed) + 1

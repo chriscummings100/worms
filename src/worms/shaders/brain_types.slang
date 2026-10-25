@@ -6,5 +6,7 @@ public static const uint BRAIN_PARAMETERS = 1074u;
 public static const uint BRAIN_ACTIVATIONS = 82u;
 public static const float MAX_TURN_RATE = 1.570796326794897;
 
+// Network storage and all inference arithmetic use native half (2 bytes).
+// FP32 observations convert at the input boundary; reproduction is outside inference.
 // Parameters per creature: W1[16][64], b1[16], W2[2][16], b2[2].
 // Activations per creature: inputs[64], hidden[16], turn, throttle.
