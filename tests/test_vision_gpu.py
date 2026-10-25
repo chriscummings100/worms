@@ -6,12 +6,13 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from tests.gpu_helpers import fixed_brains, rebuild_food_grid
+from tests.gpu_helpers import fixed_brains, grid_membership, rebuild_food_grid
 from worms.app import App
 from worms.sim import (
     ENERGY_PER_UNIT,
     FOOD_ENERGY,
     GRID_SIZE,
+    SHADER_DIR,
     VISION_FOV,
     VISION_HISTORY,
     VISION_RANGE,
@@ -26,6 +27,7 @@ pytestmark = pytest.mark.gpu
 @pytest.fixture(scope="module")
 def app():
     application = App(
+        debug_gpu=True,
         headless=True,
         benchmark=False,
         snapshot_dir=None,
@@ -36,6 +38,123 @@ def app():
     )
     yield application
     application.close()
+
+
+@pytest.fixture(scope="module")
+def reference_capture(app, tmp_path_factory):
+    """Brute-force oracle shares exact point semantics but never uses a grid."""
+    source = (SHADER_DIR / "vision.slang").read_text()
+    source += r"""
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void capture_reference(uint3 thread_id : SV_DispatchThreadID)
+{
+    uint index = thread_id.x;
+    uint creature_count = num_worlds * creatures_per_world;
+    if (index >= creature_count)
+        return;
+    Creature observer = g_creatures[index];
+    uint frame_index = (tick % VISION_HISTORY) * creature_count + index;
+    VisionFrame frame;
+    frame.position = observer.position;
+    frame.heading = observer.heading;
+    frame.tick = observer.alive ? int(tick) : -1;
+    vision_frames[frame_index] = frame;
+    VisionSlot slots[VISION_SLOTS];
+    int nearest[VISION_SLOTS];
+    for (uint segment = 0u; segment < VISION_SLOTS; ++segment)
+    {
+        slots[segment] = empty_vision_slot();
+        nearest[segment] = -1;
+    }
+    if (observer.alive)
+    {
+        uint world_index = index / creatures_per_world;
+        float2 forward = float2(cos(observer.heading), sin(observer.heading));
+        for (uint candidate = 0u; candidate < food_capacity + creatures_per_world; ++candidate)
+        {
+            bool is_food = candidate < food_capacity;
+            int object_index;
+            float2 position;
+            float size;
+            float energy = 0.0;
+            uint kind;
+            if (is_food)
+            {
+                object_index = int(world_index * food_capacity + candidate);
+                Food food = g_food[object_index];
+                if (food.energy == 0u)
+                    continue;
+                position = food.position;
+                size = 2.0 * FOOD_RADIUS;
+                energy = float(food.energy) / float(ENERGY_PER_UNIT);
+                kind = VISION_FOOD;
+            }
+            else
+            {
+                object_index = int(world_index * creatures_per_world + candidate - food_capacity);
+                Creature creature = g_creatures[object_index];
+                if (!creature.alive || uint(object_index) == index)
+                    continue;
+                position = creature.position;
+                size = 2.0 * creature.radii.x;
+                kind = VISION_CREATURE;
+            }
+            float distance;
+            float bearing;
+            int segment = vision_segment(position, observer.position, forward, distance, bearing);
+            if (segment >= 0
+                && nearer_object(slots[segment], nearest[segment], distance, kind, object_index))
+            {
+                nearest[segment] = object_index;
+                slots[segment].distance = distance;
+                slots[segment].bearing = bearing;
+                slots[segment].size = size;
+                slots[segment].food_energy = energy;
+                slots[segment].kind = kind;
+            }
+        }
+    }
+    for (uint segment = 0u; segment < VISION_SLOTS; ++segment)
+        vision_history[frame_index * VISION_SLOTS + segment] = slots[segment];
+}
+"""
+    path = tmp_path_factory.mktemp("vision_reference") / "vision_reference.slang"
+    path.write_text(source)
+    return app.device.create_compute_kernel(
+        program=app.device.load_program(str(path), ["capture_reference"])
+    )
+
+
+def assert_capture_matches_reference(sim, reference_capture):
+    encoder = sim.device.create_command_encoder()
+    sim._update_grid(encoder)
+    sim._update_vision(encoder)
+    sim.device.submit_command_buffer(encoder.finish())
+    actual_slots = sim.vision_history.to_numpy().copy()
+    actual_frames = sim.vision_frames.to_numpy().copy()
+    encoder = sim.device.create_command_encoder()
+    reference_capture.dispatch(
+        thread_count=[sim.num_worlds * sim.creature_capacity, 1, 1],
+        command_encoder=encoder,
+        num_worlds=sim.num_worlds,
+        creatures_per_world=sim.creature_capacity,
+        food_capacity=sim.food_capacity,
+        tick=sim.tick,
+        g_creatures=sim.creatures,
+        g_food=sim.food,
+        vision_history=sim.vision_history,
+        vision_frames=sim.vision_frames,
+    )
+    sim.device.submit_command_buffer(encoder.finish())
+    expected_slots = sim.vision_history.to_numpy()
+    np.testing.assert_array_equal(sim.vision_frames.to_numpy(), actual_frames)
+    actual = actual_slots.view(np.uint32).reshape(-1, 5)
+    expected = expected_slots.view(np.uint32).reshape(-1, 5)
+    np.testing.assert_array_equal(actual[:, 4], expected[:, 4])
+    np.testing.assert_allclose(
+        actual[:, :4].view(np.float32), expected[:, :4].view(np.float32), rtol=2e-6, atol=2e-6
+    )
 
 
 def make_sim(app, creatures=1, food=0, worlds=1, **kwargs):
@@ -99,6 +218,53 @@ def assert_empty(slots):
     assert all(slot["food_energy"] == 0 for slot in slots)
     assert all(slot["kind"] == 0 for slot in slots)
     assert all(slot["bearing"] == 0 and slot["size"] == 0 for slot in slots)
+
+
+@pytest.mark.parametrize("seed", [17, 81])
+def test_segment_workers_match_brute_force_in_random_crowded_wrapped_scenes(
+    app, reference_capture, seed
+):
+    sim = make_sim(app, creatures=19, food=131, worlds=3)
+    rng = np.random.default_rng(seed)
+    origins = np.array([(0.1, 511.9), (244, 132), (511.9, 0.1)])
+    positions = (origins[:, None, :] + rng.uniform(-28, 28, (3, 19, 2))) % WORLD_SIZE
+    positions[:, 0] = origins
+    food = (origins[:, None, :] + rng.uniform(-28, 28, (3, 131, 2))) % WORLD_SIZE
+    # Coincident food/creatures and exact same-kind ties exercise deterministic
+    # selection independently of grid insertion and segment thread ordering.
+    food[:, :2] = origins[:, None, :]
+    positions[:, 1] = origins
+    alive = np.ones((3, 19), dtype=bool)
+    alive[:, 3::7] = False
+    write_creatures(sim, positions.reshape(-1, 2), alive=alive.reshape(-1).tolist())
+    creatures = cursor_for(sim, "creatures")
+    for index in range(57):
+        creatures[index]["heading"] = float(rng.uniform(-math.pi, math.pi))
+        creatures[index]["radii"] = spy.float2(float(rng.uniform(0.2, 1.5)), 0.2)
+    creatures.apply()
+    energies = rng.integers(1, 10000, 393)
+    energies[5::13] = 0
+    write_food(sim, food.reshape(-1, 2), energies.tolist())
+    assert_capture_matches_reference(sim, reference_capture)
+
+
+def test_segment_cell_rejection_preserves_angular_range_and_wrapped_boundaries(
+    app, reference_capture
+):
+    origins = np.array([(0, 0), (3.99997, 127.99997), (511.99997, 511.99997), (260, 128)])
+    # Test both sides of every segment boundary, including both FOV endpoints.
+    boundaries = np.linspace(-VISION_FOV / 2, VISION_FOV / 2, VISION_SLOTS + 1)
+    bearings = (boundaries[:, None] + np.array([-1e-5, 0, 1e-5])).reshape(-1)
+    sim = make_sim(app, creatures=1, food=len(bearings), worlds=len(origins))
+    for heading in (0, math.pi / 7, -math.pi / 2, math.pi - 1e-6):
+        write_creatures(sim, origins, heading=heading)
+        for distance in (0, 9.25, VISION_RANGE - 1e-4, VISION_RANGE, VISION_RANGE + 1e-4):
+            delta = distance * np.column_stack(
+                (np.cos(heading + bearings), np.sin(heading + bearings))
+            )
+            positions = (origins[:, None, :] + delta[None, :, :]) % WORLD_SIZE
+            write_food(sim, positions.reshape(-1, 2))
+            assert_capture_matches_reference(sim, reference_capture)
 
 
 def test_all_segments_keep_exact_bearings_distances_and_unquantized_food_energy(app):
@@ -203,15 +369,14 @@ def test_exact_distance_ties_prefer_food_then_the_lowest_food_index(app):
     sim = make_sim(app, creatures=2, food=2)
     write_creatures(sim, [(100, 100), (108, 100)])
     write_food(sim, [(108, 100), (108, 100)], [FOOD_ENERGY, 2 * FOOD_ENERGY])
-    # Capture directly: an update would collect the co-located food first.
-    encoder = sim.device.create_command_encoder()
-    sim._update_grid(encoder)
-    sim._update_vision(encoder)
-    sim.device.submit_command_buffer(encoder.finish())
+    # Sensing observes both pieces before contact resolution consumes them.
+    sim.update()
     slot = sim.inspect_vision(0, 0)["slots"][8]
     assert slot["distance"] == 8
     assert slot["kind"] == 1
     assert slot["food_energy"] == FOOD_ENERGY / ENERGY_PER_UNIT
+    food = cursor_for(sim, "food")
+    assert food[0]["energy"].read() == food[1]["energy"].read() == 0
 
 
 def test_range_and_fov_endpoints_are_inclusive_but_points_outside_are_excluded(app):
@@ -293,7 +458,7 @@ def test_equal_distance_creatures_have_a_stable_tie_and_dead_observers_keep_old_
     assert sim.inspect_vision(0, 0, age=1) == before
 
 
-def test_collection_removes_food_from_current_vision_without_rewriting_history(app):
+def test_collection_changes_next_vision_without_rewriting_the_detection_snapshot(app):
     sim = make_sim(app, food=1)
     write_creatures(sim, [(100, 100)])
     write_food(sim, [(104, 100)])
@@ -303,12 +468,21 @@ def test_collection_removes_food_from_current_vision_without_rewriting_history(a
 
     write_creatures(sim, [(104, 100)])
     sim.update()
-    assert_empty(sim.inspect_vision(0, 0)["slots"])
+    contact_frame = sim.inspect_vision(0, 0)
+    assert contact_frame["slots"][8]["kind"] == 1
+    assert contact_frame["slots"][8]["distance"] == 0
+    assert contact_frame["slots"][8]["food_energy"] == FOOD_ENERGY / ENERGY_PER_UNIT
+    assert cursor_for(sim, "food")[0]["energy"].read() == 0
     assert sim.inspect_vision(0, 0, age=1) == before
-    assert sim.inspect_vision(0, 0)["position"] == pytest.approx((104, 100))
+    assert contact_frame["position"] == pytest.approx((104, 100))
+
+    sim.update()
+    assert_empty(sim.inspect_vision(0, 0)["slots"])
+    assert sim.inspect_vision(0, 0, age=1) == contact_frame
+    assert sim.inspect_vision(0, 0, age=2) == before
 
 
-def test_food_spawned_this_tick_is_visible_in_the_same_capture(app):
+def test_food_spawned_after_resolution_becomes_visible_next_tick(app):
     sim = make_sim(app, food=1, initial_food=0, food_per_second=60)
     sim.update()
     spawn_position = tuple(cursor_for(sim, "food")[0]["position"].read())
@@ -316,14 +490,19 @@ def test_food_spawned_this_tick_is_visible_in_the_same_capture(app):
     observer = ((spawn_position[0] - 8) % WORLD_SIZE, spawn_position[1])
     write_creatures(sim, [observer])
     sim.update()
+    spawned_frame = sim.inspect_vision(0, 0)
+    assert_empty(spawned_frame["slots"])
+    assert cursor_for(sim, "food")[0]["energy"].read() == FOOD_ENERGY
+    assert tuple(cursor_for(sim, "food")[0]["position"].read()) == spawn_position
 
+    sim.update()
     frame = sim.inspect_vision(0, 0)
     assert frame["slots"][8]["distance"] == pytest.approx(8, abs=2e-5)
     assert frame["slots"][8]["food_energy"] == FOOD_ENERGY / ENERGY_PER_UNIT
-    assert_empty(sim.inspect_vision(0, 0, age=1)["slots"])
+    assert sim.inspect_vision(0, 0, age=1) == spawned_frame
 
 
-def test_cached_food_grid_keeps_high_slots_and_ignores_eaten_links_without_cross_world_entries(app):
+def test_food_grid_keeps_high_slots_and_removes_eaten_links_each_tick_without_world_leakage(app):
     sim = make_sim(app, food=5, worlds=2)
     write_creatures(sim, [(100, 100), (100, 100)])
     write_food(
@@ -334,20 +513,9 @@ def test_cached_food_grid_keeps_high_slots_and_ignores_eaten_links_without_cross
     sim.update()
 
     def members():
-        heads = sim.food_grid_heads.to_numpy().view(np.int32).reshape(2, GRID_SIZE**2)
+        cells = grid_membership(sim.food_grid_heads.to_numpy(), sim.food_grid_next.to_numpy())
         links = sim.food_grid_next.to_numpy().view(np.int32).reshape(-1)
-        found = []
-        for world, cells in enumerate(heads):
-            seen = set()
-            for head in cells[cells >= 0]:
-                index = int(head)
-                while index >= 0:
-                    assert world * 5 <= index < (world + 1) * 5
-                    assert index not in seen
-                    seen.add(index)
-                    index = int(links[index])
-            found.append(seen)
-        return found, links
+        return [set().union(*world.values()) for world in cells], links
 
     assert members()[0] == [{1, 4}, {6, 9}]
     for world in range(2):
@@ -359,12 +527,8 @@ def test_cached_food_grid_keeps_high_slots_and_ignores_eaten_links_without_cross
     food.apply()
     sim.update()
     found, links = members()
-    assert found == [{1, 4}, {6, 9}]
-    assert links[4] == 1
-    # Rebuilding removes the dead link; retaining it must not change sensing.
-    rebuild_food_grid(sim)
-    assert members()[0] == [{1}, {6, 9}]
-    assert members()[1][4] == -1
+    assert found == [{1}, {6, 9}]
+    assert links[4] == -1
     assert sim.inspect_vision(0, 0)["slots"][8]["food_energy"] == FOOD_ENERGY / ENERGY_PER_UNIT
 
 
@@ -384,7 +548,7 @@ def test_changed_food_energy_is_captured_without_rewriting_older_observations(ap
     assert sim.inspect_vision(0, 0, age=1) == before
 
 
-def test_respawning_an_eaten_slot_rebuilds_its_cached_location(app):
+def test_respawning_an_eaten_slot_rebuilds_its_location_at_next_detection_boundary(app):
     sim = make_sim(app, food=1)
     write_creatures(sim, [(100, 100)])
     write_food(sim, [(104, 100)])
@@ -393,6 +557,7 @@ def test_respawning_an_eaten_slot_rebuilds_its_cached_location(app):
     sim.update()
     assert cursor_for(sim, "food")[0]["energy"].read() == 0
     old_cell = 25 * GRID_SIZE + 26
+    # The tick's immutable grid still describes the scene before consumption.
     assert sim.food_grid_heads.to_numpy().view(np.int32).reshape(-1)[old_cell] == 0
 
     sim.food_per_second = 60
@@ -401,10 +566,12 @@ def test_respawning_an_eaten_slot_rebuilds_its_cached_location(app):
     new_cell = int(spawned[1] // 4) * GRID_SIZE + int(spawned[0] // 4)
     assert new_cell != old_cell
     heads = sim.food_grid_heads.to_numpy().view(np.int32).reshape(-1)
-    assert heads[old_cell] == -1 and heads[new_cell] == 0
+    assert heads[old_cell] == -1 and heads[new_cell] == -1
     sim.food_per_second = 0
     write_creatures(sim, [((spawned[0] - 8) % WORLD_SIZE, spawned[1])])
     sim.update()
+    heads = sim.food_grid_heads.to_numpy().view(np.int32).reshape(-1)
+    assert heads[old_cell] == -1 and heads[new_cell] == 0
     visible = sim.inspect_vision(0, 0)["slots"][8]
     assert visible["kind"] == 1
     assert visible["distance"] == pytest.approx(8, abs=2e-5)

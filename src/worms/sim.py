@@ -5,6 +5,8 @@ from pathlib import Path
 
 import slangpy as spy
 
+from worms.dispatch import BoundDispatch
+
 SHADER_DIR = Path(__file__).parent / "shaders"
 WORLD_SIZE = 512.0  # Metres; matches the shared Slang world constant.
 TIME_STEP = 1.0 / 60.0
@@ -12,7 +14,7 @@ CREATURE_CAPACITY = 1024
 FOOD_CAPACITY = 8192
 INITIAL_FOOD = 2048
 TARGET_FOOD = 4096
-FOOD_PER_SECOND = 1.5
+FOOD_PER_SECOND = 10.0
 ENERGY_PER_UNIT = 1024
 FOOD_ENERGY = 5 * ENERGY_PER_UNIT
 FOOD_AGE_START = 100_000
@@ -20,6 +22,8 @@ FOOD_AGE_FADE = 0
 INITIAL_ENERGY = 100 * ENERGY_PER_UNIT  # Per metre of body length.
 IDLE_ENERGY_COST = 0.05
 SPEED_ENERGY_COST = 0.001
+INPUT_MUTATION_PROBABILITY = 0.10
+POLICY_MUTATION_PROBABILITY = 0.10
 GRID_CELL_SIZE = 4.0
 GRID_SIZE = 128
 GRID_CELL_COUNT = GRID_SIZE * GRID_SIZE
@@ -61,6 +65,8 @@ class Sim:
         food_age_start=FOOD_AGE_START,
         food_age_fade=FOOD_AGE_FADE,
         mutation_enabled=True,
+        input_mutation_probability=INPUT_MUTATION_PROBABILITY,
+        policy_mutation_probability=POLICY_MUTATION_PROBABILITY,
     ):
         if num_worlds < 1 or creatures_per_world < 0:
             raise ValueError("Need at least one world and a nonnegative creature count")
@@ -72,6 +78,10 @@ class Sim:
             raise ValueError("Need 0 <= initial food <= target <= capacity and a nonnegative rate")
         if food_age_start < 0 or food_age_fade < 0:
             raise ValueError("Food decline age and duration must be nonnegative")
+        if not 0 <= input_mutation_probability <= 1:
+            raise ValueError("Input mutation probability must be between 0 and 1")
+        if not 0 <= policy_mutation_probability <= 1:
+            raise ValueError("Policy mutation probability must be between 0 and 1")
         self.device = device
         self.num_worlds = num_worlds
         self.creatures_per_world = creatures_per_world
@@ -85,6 +95,8 @@ class Sim:
         self.food_age_start = food_age_start
         self.food_age_fade = food_age_fade
         self.mutation_enabled = mutation_enabled
+        self.input_mutation_probability = input_mutation_probability
+        self.policy_mutation_probability = policy_mutation_probability
         self.tick = 0
 
         self._initialize = device.create_compute_kernel(
@@ -111,8 +123,16 @@ class Sim:
         self._build_grid = device.create_compute_kernel(
             program=device.load_program(str(SHADER_DIR / "contact.slang"), ["build_grid"])
         )
-        self._collect_food = device.create_compute_kernel(
-            program=device.load_program(str(SHADER_DIR / "contact.slang"), ["collect_food"])
+        self._clear_food_contacts = device.create_compute_kernel(
+            program=device.load_program(str(SHADER_DIR / "contact.slang"), ["clear_food_contacts"])
+        )
+        self._detect_food_contacts = device.create_compute_kernel(
+            program=device.load_program(str(SHADER_DIR / "contact.slang"), ["detect_food_contacts"])
+        )
+        self._resolve_food_contacts = device.create_compute_kernel(
+            program=device.load_program(
+                str(SHADER_DIR / "contact.slang"), ["resolve_food_contacts"]
+            )
         )
         self._apply_food = device.create_compute_kernel(
             program=device.load_program(str(SHADER_DIR / "contact.slang"), ["apply_food"])
@@ -138,9 +158,15 @@ class Sim:
         self._resolve_lifecycle = device.create_compute_kernel(
             program=device.load_program(str(SHADER_DIR / "lifecycle.slang"), ["resolve_lifecycle"])
         )
-        self._reset_newborn_history = device.create_compute_kernel(
+        self._clear_lifecycle = device.create_compute_kernel(
+            program=device.load_program(str(SHADER_DIR / "lifecycle.slang"), ["clear_lifecycle"])
+        )
+        self._settle_lifecycle = device.create_compute_kernel(
+            program=device.load_program(str(SHADER_DIR / "lifecycle.slang"), ["settle_lifecycle"])
+        )
+        self._initialize_newborns = device.create_compute_kernel(
             program=device.load_program(
-                str(SHADER_DIR / "lifecycle.slang"), ["reset_newborn_history"]
+                str(SHADER_DIR / "lifecycle.slang"), ["initialize_newborns"]
             )
         )
         usage = spy.BufferUsage.unordered_access | spy.BufferUsage.shader_resource
@@ -180,6 +206,12 @@ class Sim:
             usage=usage,
             label="food-credits",
         )
+        self.food_energy_totals = device.create_buffer(
+            element_count=num_worlds * 3,
+            resource_type_layout=self._apply_food.reflection.food_energy_totals,
+            usage=usage,
+            label="food-energy-totals",
+        )
         self.food_grid_heads = device.create_buffer(
             element_count=num_worlds * GRID_CELL_COUNT,
             resource_type_layout=self._clear_food_grid.reflection.food_grid_heads,
@@ -192,6 +224,37 @@ class Sim:
             usage=usage,
             label="food-grid-next",
         )
+        # Derived per-tick action state; cleared before use, not saved in checkpoints.
+        for name, count, stride in (
+            ("food_contact_winners", num_worlds * food_capacity, 8),
+            ("food_contact_queue", num_worlds * food_capacity, 4),
+            ("food_contact_counts", num_worlds, 4),
+            ("food_contact_overflow", num_worlds, 4),
+            ("contact_guids", num_worlds * creature_capacity, 8),
+        ):
+            setattr(
+                self,
+                name,
+                device.create_buffer(
+                    element_count=max(1, count), struct_size=stride, usage=usage, label=name
+                ),
+            )
+        self._lifecycle_words = max(1, (creature_capacity + 31) // 32)
+        self._birth_capacity = max(1, creature_capacity // 2)
+        for name, count, stride in (
+            ("lifecycle_counts", num_worlds, 12),
+            ("lifecycle_free_slots", num_worlds * self._lifecycle_words, 4),
+            ("lifecycle_split_slots", num_worlds * self._lifecycle_words, 4),
+            ("lifecycle_split_guids", num_worlds * creature_capacity, 8),
+            ("lifecycle_births", num_worlds * self._birth_capacity, 12),
+        ):
+            setattr(
+                self,
+                name,
+                device.create_buffer(
+                    element_count=max(1, count), struct_size=stride, usage=usage, label=name
+                ),
+            )
         self.vision_frames = device.create_buffer(
             element_count=max(1, num_worlds * creature_capacity * VISION_HISTORY),
             resource_type_layout=self._capture_vision.reflection.vision_frames,
@@ -280,7 +343,257 @@ class Sim:
             ],
             rasterizer={"cull_mode": spy.CullMode.none},
         )
+        self._bind_dispatches()
         self.reset()
+
+    def _bind_dispatches(self):
+        """Pack fixed resources and capacities once; tick/settings stay scalar writes."""
+        self._set_food_energy = BoundDispatch(
+            self.device,
+            self._set_food_energy,
+            [max(1, self.num_worlds * self.food_capacity), 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "food_capacity": self.food_capacity,
+                "g_food": self.food,
+            },
+            dynamic=("food_energy",),
+        )
+        self._clear_grid = BoundDispatch(
+            self.device,
+            self._clear_grid,
+            [self.num_worlds * GRID_CELL_COUNT, 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "creatures_per_world": self.creature_capacity,
+                "g_worlds": self.worlds,
+                "g_creatures": self.creatures,
+                "grid_heads": self.grid_heads,
+            },
+        )
+        self._build_grid = BoundDispatch(
+            self.device,
+            self._build_grid,
+            [max(1, self.num_worlds * self.creature_capacity), 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "creatures_per_world": self.creature_capacity,
+                "g_worlds": self.worlds,
+                "g_creatures": self.creatures,
+                "grid_heads": self.grid_heads,
+                "grid_next": self.grid_next,
+                "food_credits": self.food_credits,
+            },
+        )
+        self._clear_lifecycle = BoundDispatch(
+            self.device,
+            self._clear_lifecycle,
+            [self.num_worlds * self._lifecycle_words, 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "creatures_per_world": self.creature_capacity,
+                "g_worlds": self.worlds,
+                "lifecycle_counts": self.lifecycle_counts,
+                "lifecycle_free_slots": self.lifecycle_free_slots,
+                "lifecycle_split_slots": self.lifecycle_split_slots,
+            },
+        )
+        self._settle_lifecycle = BoundDispatch(
+            self.device,
+            self._settle_lifecycle,
+            [max(1, self.num_worlds * self.creature_capacity), 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "creatures_per_world": self.creature_capacity,
+                "g_worlds": self.worlds,
+                "g_creatures": self.creatures,
+                "brain_activations": self.brain_activations,
+                "lifecycle_counts": self.lifecycle_counts,
+                "lifecycle_free_slots": self.lifecycle_free_slots,
+                "lifecycle_split_slots": self.lifecycle_split_slots,
+                "lifecycle_split_guids": self.lifecycle_split_guids,
+            },
+            dynamic=("tick", "food_age_start", "food_age_fade"),
+        )
+        self._resolve_lifecycle = BoundDispatch(
+            self.device,
+            self._resolve_lifecycle,
+            [self.num_worlds, 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "creatures_per_world": self.creature_capacity,
+                "g_worlds": self.worlds,
+                "g_creatures": self.creatures,
+                "lifecycle_counts": self.lifecycle_counts,
+                "lifecycle_free_slots": self.lifecycle_free_slots,
+                "lifecycle_split_slots": self.lifecycle_split_slots,
+                "lifecycle_split_guids": self.lifecycle_split_guids,
+                "lifecycle_births": self.lifecycle_births,
+            },
+            dynamic=("seed", "tick"),
+        )
+        self._initialize_newborns = BoundDispatch(
+            self.device,
+            self._initialize_newborns,
+            [64 * self._birth_capacity, self.num_worlds, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "creatures_per_world": self.creature_capacity,
+                "lifecycle_counts": self.lifecycle_counts,
+                "lifecycle_births": self.lifecycle_births,
+                "brain_weights": self.brain_weights,
+                "brain_activations": self.brain_activations,
+                "vision_frames": self.vision_frames,
+                "vision_history": self.vision_history,
+            },
+            dynamic=(
+                "mutation_enabled",
+                "input_mutation_probability",
+                "policy_mutation_probability",
+            ),
+        )
+        self._clear_food_grid = BoundDispatch(
+            self.device,
+            self._clear_food_grid,
+            [self.num_worlds * GRID_CELL_COUNT, 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "food_grid_heads": self.food_grid_heads,
+            },
+        )
+        self._build_food_grid = BoundDispatch(
+            self.device,
+            self._build_food_grid,
+            [max(1, self.num_worlds * self.food_capacity), 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "food_capacity": self.food_capacity,
+                "g_food": self.food,
+                "food_grid_heads": self.food_grid_heads,
+                "food_grid_next": self.food_grid_next,
+            },
+        )
+        self._capture_vision = BoundDispatch(
+            self.device,
+            self._capture_vision,
+            [max(1, self.num_worlds * self.creature_capacity * VISION_SLOTS), 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "creatures_per_world": self.creature_capacity,
+                "food_capacity": self.food_capacity,
+                "g_creatures": self.creatures,
+                "g_food": self.food,
+                "grid_heads": self.grid_heads,
+                "grid_next": self.grid_next,
+                "food_grid_heads": self.food_grid_heads,
+                "food_grid_next": self.food_grid_next,
+                "vision_frames": self.vision_frames,
+                "vision_history": self.vision_history,
+            },
+            dynamic=("tick",),
+        )
+        self._evaluate_brains = BoundDispatch(
+            self.device,
+            self._evaluate_brains,
+            [max(1, self.num_worlds * self.creature_capacity), 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "creatures_per_world": self.creature_capacity,
+                "g_creatures": self.creatures,
+                "vision_frames": self.vision_frames,
+                "vision_history": self.vision_history,
+                "brain_weights": self.brain_weights,
+                "brain_activations": self.brain_activations,
+            },
+            dynamic=("tick",),
+        )
+        self._clear_food_contacts = BoundDispatch(
+            self.device,
+            self._clear_food_contacts,
+            [max(self.num_worlds, self.num_worlds * self.food_capacity), 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "food_capacity": self.food_capacity,
+                "food_contact_winners": self.food_contact_winners,
+                "food_contact_counts": self.food_contact_counts,
+                "food_contact_overflow": self.food_contact_overflow,
+            },
+        )
+        self._detect_food_contacts = BoundDispatch(
+            self.device,
+            self._detect_food_contacts,
+            [max(1, self.num_worlds * self.creature_capacity * 16), 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "creatures_per_world": self.creature_capacity,
+                "food_capacity": self.food_capacity,
+                "g_creatures": self.creatures,
+                "g_food": self.food,
+                "food_grid_heads": self.food_grid_heads,
+                "food_grid_next": self.food_grid_next,
+                "food_contact_winners": self.food_contact_winners,
+                "food_contact_queue": self.food_contact_queue,
+                "food_contact_counts": self.food_contact_counts,
+                "food_contact_overflow": self.food_contact_overflow,
+                "contact_guids": self.contact_guids,
+            },
+            dynamic=("seed", "tick"),
+        )
+        self._resolve_food_contacts = BoundDispatch(
+            self.device,
+            self._resolve_food_contacts,
+            [self.num_worlds, 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "creatures_per_world": self.creature_capacity,
+                "food_capacity": self.food_capacity,
+                "g_worlds": self.worlds,
+                "g_creatures": self.creatures,
+                "g_food": self.food,
+                "food_credits": self.food_credits,
+                "food_contact_winners": self.food_contact_winners,
+                "food_contact_queue": self.food_contact_queue,
+                "food_contact_counts": self.food_contact_counts,
+                "food_contact_overflow": self.food_contact_overflow,
+                "contact_guids": self.contact_guids,
+            },
+        )
+        self._apply_food = BoundDispatch(
+            self.device,
+            self._apply_food,
+            [max(1, self.num_worlds * self.creature_capacity), 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "creatures_per_world": self.creature_capacity,
+                "g_creatures": self.creatures,
+                "food_credits": self.food_credits,
+                "food_energy_totals": self.food_energy_totals,
+            },
+            dynamic=("tick", "food_age_start", "food_age_fade"),
+        )
+        self._step = BoundDispatch(
+            self.device,
+            self._step,
+            [max(1, self.num_worlds * self.creature_capacity), 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "creatures_per_world": self.creature_capacity,
+                "g_creatures": self.creatures,
+                "brain_activations": self.brain_activations,
+            },
+        )
+        self._grow_food = BoundDispatch(
+            self.device,
+            self._grow_food,
+            [self.num_worlds, 1, 1],
+            {
+                "num_worlds": self.num_worlds,
+                "food_capacity": self.food_capacity,
+                "g_worlds": self.worlds,
+                "g_food": self.food,
+            },
+            dynamic=("food_energy", "target_food", "spawn_budget", "seed"),
+        )
 
     @property
     def food_energy(self):
@@ -301,14 +614,8 @@ class Sim:
         if not self._food_energy_dirty:
             return
         self._set_food_energy.dispatch(
-            thread_count=[max(1, self.num_worlds * self.food_capacity), 1, 1],
             command_encoder=encoder,
-            vars={
-                "num_worlds": self.num_worlds,
-                "food_capacity": self.food_capacity,
-                "food_energy": self._food_energy_quanta,
-                "g_food": self.food,
-            },
+            food_energy=self._food_energy_quanta,
         )
         self._food_energy_dirty = False
 
@@ -326,6 +633,7 @@ class Sim:
                 "initial_creatures": self.creatures_per_world,
                 "g_worlds": self.worlds,
                 "g_creatures": self.creatures,
+                "food_energy_totals": self.food_energy_totals,
             },
         )
         self._initialize_food.dispatch(
@@ -373,165 +681,80 @@ class Sim:
             self.device.submit_command_buffer(encoder.finish())
 
     def _update_grid(self, encoder):
-        """Clear cells in parallel, then insert creatures serially within each world."""
-        self._clear_grid.dispatch(
-            thread_count=[self.num_worlds * GRID_CELL_COUNT, 1, 1],
-            command_encoder=encoder,
-            vars={"num_worlds": self.num_worlds, "grid_heads": self.grid_heads},
-        )
-        self._build_grid.dispatch(
-            thread_count=[self.num_worlds, 1, 1],
-            command_encoder=encoder,
-            vars={
-                "num_worlds": self.num_worlds,
-                "creatures_per_world": self.creature_capacity,
-                "g_worlds": self.worlds,
-                "g_creatures": self.creatures,
-                "grid_heads": self.grid_heads,
-                "grid_next": self.grid_next,
-                "food_credits": self.food_credits,
-            },
-        )
+        """Clear cells and reduce radii, then atomically insert each creature in parallel."""
+        self._clear_grid.dispatch(command_encoder=encoder)
+        self._build_grid.dispatch(command_encoder=encoder)
 
     def _update_lifecycle(self, encoder):
-        """Settle costs, deaths and energy-funded births, then clear reused histories."""
-        self._resolve_lifecycle.dispatch(
-            thread_count=[self.num_worlds, 1, 1],
+        """Settle independent costs in parallel, then resolve and initialize sparse births."""
+        self._clear_lifecycle.dispatch(command_encoder=encoder)
+        self._settle_lifecycle.dispatch(
             command_encoder=encoder,
-            vars={
-                "num_worlds": self.num_worlds,
-                "creatures_per_world": self.creature_capacity,
-                "seed": self.seed,
-                "tick": self.tick + 1,
-                "food_age_start": self.food_age_start,
-                "food_age_fade": self.food_age_fade,
-                "mutation_enabled": self.mutation_enabled,
-                "g_worlds": self.worlds,
-                "g_creatures": self.creatures,
-                "brain_weights": self.brain_weights,
-                "brain_activations": self.brain_activations,
-            },
+            tick=self.tick + 1,
+            food_age_start=self.food_age_start,
+            food_age_fade=self.food_age_fade,
         )
-        self._reset_newborn_history.dispatch(
-            thread_count=[max(1, self.num_worlds * self.creature_capacity * VISION_HISTORY), 1, 1],
+        self._resolve_lifecycle.dispatch(
             command_encoder=encoder,
-            vars={
-                "num_worlds": self.num_worlds,
-                "creatures_per_world": self.creature_capacity,
-                "tick": self.tick + 1,
-                "g_creatures": self.creatures,
-                "vision_frames": self.vision_frames,
-                "vision_history": self.vision_history,
-            },
+            seed=self.seed,
+            tick=self.tick + 1,
+        )
+        self._initialize_newborns.dispatch(
+            command_encoder=encoder,
+            mutation_enabled=self.mutation_enabled,
+            input_mutation_probability=self.input_mutation_probability,
+            policy_mutation_probability=self.policy_mutation_probability,
         )
 
     def _update_food_grid(self, encoder):
-        self._clear_food_grid.dispatch(
-            thread_count=[self.num_worlds * GRID_CELL_COUNT, 1, 1],
-            command_encoder=encoder,
-            vars={"num_worlds": self.num_worlds, "food_grid_heads": self.food_grid_heads},
-        )
-        self._build_food_grid.dispatch(
-            thread_count=[self.num_worlds, 1, 1],
-            command_encoder=encoder,
-            vars={
-                "num_worlds": self.num_worlds,
-                "food_capacity": self.food_capacity,
-                "g_food": self.food,
-                "food_grid_heads": self.food_grid_heads,
-                "food_grid_next": self.food_grid_next,
-            },
-        )
+        self._clear_food_grid.dispatch(command_encoder=encoder)
+        self._build_food_grid.dispatch(command_encoder=encoder)
 
-    def _update_vision(self, encoder, *, rebuild_food_grid=True):
-        """Capture the settled scene without reducing history."""
-        # Food stays still; capture skips eaten slots still linked in the grid.
-        # Rebuild when spawning may have reused a slot elsewhere.
-        if rebuild_food_grid:
-            self._update_food_grid(encoder)
+    def _update_vision(self, encoder, *, tick=None):
+        """Capture the immutable detection scene before structural resolution."""
+        self._update_food_grid(encoder)
         self._capture_vision.dispatch(
-            thread_count=[max(1, self.num_worlds * self.creature_capacity), 1, 1],
             command_encoder=encoder,
-            vars={
-                "num_worlds": self.num_worlds,
-                "creatures_per_world": self.creature_capacity,
-                "food_capacity": self.food_capacity,
-                "tick": self.tick,
-                "g_creatures": self.creatures,
-                "g_food": self.food,
-                "grid_heads": self.grid_heads,
-                "grid_next": self.grid_next,
-                "food_grid_heads": self.food_grid_heads,
-                "food_grid_next": self.food_grid_next,
-                "vision_frames": self.vision_frames,
-                "vision_history": self.vision_history,
-            },
+            tick=self.tick if tick is None else tick,
         )
 
-    def _update_brains(self, encoder):
+    def _update_brains(self, encoder, *, tick=None):
         """Evaluate current vision and retain activations and the next movement command."""
         self._evaluate_brains.dispatch(
-            thread_count=[max(1, self.num_worlds * self.creature_capacity), 1, 1],
             command_encoder=encoder,
-            vars={
-                "num_worlds": self.num_worlds,
-                "creatures_per_world": self.creature_capacity,
-                "tick": self.tick,
-                "g_creatures": self.creatures,
-                "vision_frames": self.vision_frames,
-                "vision_history": self.vision_history,
-                "brain_weights": self.brain_weights,
-                "brain_activations": self.brain_activations,
-            },
+            tick=self.tick if tick is None else tick,
+        )
+
+    def _detect_contacts(self, encoder):
+        """Build a bounded food-action queue from the immutable grid snapshot."""
+        self._clear_food_contacts.dispatch(command_encoder=encoder)
+        self._detect_food_contacts.dispatch(
+            command_encoder=encoder,
+            seed=self.seed,
+            tick=self.tick,
+        )
+
+    def _resolve_contacts(self, encoder):
+        """Revalidate and settle food actions, then apply each creature's total intake."""
+        self._resolve_food_contacts.dispatch(command_encoder=encoder)
+        self._apply_food.dispatch(
+            command_encoder=encoder,
+            tick=self.tick + 1,
+            food_age_start=self.food_age_start,
+            food_age_fade=self.food_age_fade,
         )
 
     def update(self, command_encoder=None):
         """Record one 1/60 second step; supplied encoders keep update and draw ordered."""
         encoder = command_encoder or self.device.create_command_encoder()
         self.apply_settings(encoder)
-        self._step.dispatch(
-            thread_count=[max(1, self.num_worlds * self.creature_capacity), 1, 1],
-            command_encoder=encoder,
-            vars={
-                "num_worlds": self.num_worlds,
-                "creatures_per_world": self.creature_capacity,
-                "g_creatures": self.creatures,
-                "brain_activations": self.brain_activations,
-            },
-        )
+        self._step.dispatch(command_encoder=encoder)
         self._update_grid(encoder)
-        self._collect_food.dispatch(
-            thread_count=[max(1, self.num_worlds * self.food_capacity), 1, 1],
-            command_encoder=encoder,
-            vars={
-                "num_worlds": self.num_worlds,
-                "creatures_per_world": self.creature_capacity,
-                "food_capacity": self.food_capacity,
-                "seed": self.seed,
-                "tick": self.tick,
-                "g_worlds": self.worlds,
-                "g_creatures": self.creatures,
-                "g_food": self.food,
-                "grid_heads": self.grid_heads,
-                "grid_next": self.grid_next,
-                "food_credits": self.food_credits,
-            },
-        )
-        self._apply_food.dispatch(
-            thread_count=[max(1, self.num_worlds * self.creature_capacity), 1, 1],
-            command_encoder=encoder,
-            vars={
-                "num_worlds": self.num_worlds,
-                "creatures_per_world": self.creature_capacity,
-                "tick": self.tick + 1,
-                "food_age_start": self.food_age_start,
-                "food_age_fade": self.food_age_fade,
-                "g_creatures": self.creatures,
-                "food_credits": self.food_credits,
-            },
-        )
+        self._update_vision(encoder, tick=self.tick + 1)
+        self._update_brains(encoder, tick=self.tick + 1)
+        self._detect_contacts(encoder)
+        self._resolve_contacts(encoder)
         self._update_lifecycle(encoder)
-        self._update_grid(encoder)  # Vision must see settled deaths and newborn positions.
         # Cumulative whole pieces carry fractional rates across fixed ticks.
         # Counts and food records remain on the GPU; no per-frame readback.
         budget = int((self.tick + 1) * self.food_per_second * TIME_STEP) - int(
@@ -539,22 +762,13 @@ class Sim:
         )
         if budget:
             self._grow_food.dispatch(
-                thread_count=[self.num_worlds, 1, 1],
                 command_encoder=encoder,
-                vars={
-                    "num_worlds": self.num_worlds,
-                    "food_capacity": self.food_capacity,
-                    "food_energy": self._food_energy_quanta,
-                    "target_food": self.target_food,
-                    "spawn_budget": budget,
-                    "seed": self.seed,
-                    "g_worlds": self.worlds,
-                    "g_food": self.food,
-                },
+                food_energy=self._food_energy_quanta,
+                target_food=self.target_food,
+                spawn_budget=budget,
+                seed=self.seed,
             )
         self.tick += 1
-        self._update_vision(encoder, rebuild_food_grid=bool(budget))
-        self._update_brains(encoder)
         if command_encoder is None:
             self.device.submit_command_buffer(encoder.finish())
 
@@ -624,7 +838,7 @@ class Sim:
             layout, self.vision_frames, size=layout.stride, offset=index * layout.stride
         )[0].read()
         if frame["tick"] != tick:
-            return None  # Dead creatures do not record observations.
+            return None  # No observation for this tick or this slot's current occupant.
         frame["position"] = tuple(frame["position"])
         layout = self._capture_vision.reflection.vision_history.type_layout.element_type_layout
         slots = spy.BufferCursor(

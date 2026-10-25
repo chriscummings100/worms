@@ -12,8 +12,9 @@ def comparison_result(sample):
         return {
             "no_current_population": "No live population to sample",
             "no_reference_population": "No reference population to sample",
-        }.get(sample.get("reason"), "Both cohorts extinct: no score")
-    return f"Current share {sample['score']:.1%} (50% = equal)"
+            "no_energy_collected": "No food energy collected: no score",
+        }.get(sample.get("reason"), "No score")
+    return f"Current energy share {sample['score']:.1%} (50% = equal)"
 
 
 def comparison_image(size, history):
@@ -22,7 +23,7 @@ def comparison_image(size, history):
     draw = ImageDraw.Draw(image)
     font = ImageFont.load_default(size=13)
     quiet, bright, cyan = (146, 165, 177), (216, 229, 235), (72, 213, 192)
-    draw.text((16, 10), "CURRENT vs INITIAL | surviving descendants", font=font, fill=bright)
+    draw.text((16, 10), "CURRENT vs BASELINE | food energy collected", font=font, fill=bright)
     if width < 200 or height < 100:
         return image
     left, top, right, bottom = 54, 43, width - 24, height - 32

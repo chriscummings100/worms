@@ -16,6 +16,7 @@ def app():
 
     # Odd dimensions and a partial compute group catch out-of-range writes.
     application = App(
+        debug_gpu=True,
         headless=True,
         benchmark=False,
         snapshot_dir=None,
@@ -387,6 +388,60 @@ def render_world(app, *, update=False, **options):
         app.sim.render(render_pass, (0, 0, app.texture.width, app.texture.height), 0, **options)
     app.device.submit_command_buffer(encoder.finish())
     return app.texture.to_numpy().copy()
+
+
+@pytest.mark.parametrize("click_offspring", [False, True])
+def test_split_retires_selected_parent_and_requires_a_click_to_select_an_offspring(
+    app, click_offspring
+):
+    app.sim = Sim(
+        app.device,
+        num_worlds=1,
+        creatures_per_world=1,
+        creature_capacity=2,
+        food_capacity=0,
+        initial_food=0,
+        target_food=0,
+        food_per_second=0,
+    )
+    app.selected_world = 0
+    app.selected_creature = 0
+    app.refresh_stats()
+    parent_guid = app.selected_guid
+    parent_position = app.creature_stats["position"]
+    app.camera.scale = 128
+    app.set_follow(True)
+    assert app.following
+    fixed_brains(app.sim, movement=0)
+    cursor = creature_cursor(app.sim)
+    cursor[0]["energy"] = cursor[0]["split_energy"].read() + 100
+    cursor.apply()
+
+    app.sim.update()
+    siblings = [app.sim.inspect(0, index) for index in range(2)]
+    assert all(child["alive"] and child["guid"] != parent_guid for child in siblings)
+    assert all(child["parent_guid"] == parent_guid for child in siblings)
+    if click_offspring:
+        # Click the same slot before the next inspector poll detects retirement.
+        rect = app.focused_rect()
+        scale = app.camera.pixels_per_unit(rect)
+        point = tuple(
+            rect[axis]
+            + rect[axis + 2] / 2
+            + (siblings[0]["position"][axis] - parent_position[axis]) * scale
+            for axis in range(2)
+        )
+        app.pick(point)
+        assert app.selected_creature == 0 and app.selected_guid == siblings[0]["guid"]
+        assert app.creature_stats["parent_guid"] == parent_guid
+    else:
+        app.refresh_stats()
+        assert app.selected_creature is None and app.selected_guid == 0
+        assert app.creature_stats is None
+    assert not app.following
+    assert app.camera.offset == pytest.approx(
+        tuple(coordinate - WORLD_SIZE / 2 for coordinate in parent_position)
+    )
 
 
 def test_reused_selection_does_not_follow_highlight_or_pick_the_new_creature(app):

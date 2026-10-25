@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import slangpy as spy
 
+from tests.gpu_helpers import assert_sim_buffers_equal
 from worms.sim import SHADER_DIR, Sim
 from worms.snapshots import (
     SIM_BUFFERS,
@@ -57,15 +58,18 @@ def advance(sim, count):
     sim.device.submit_command_buffer(encoder.finish())
 
 
-def assert_same_state(first, second):
+def assert_same_state(first, second, *, continued=False):
     assert first.tick == second.tick
     assert first._food_energy_dirty == second._food_energy_dirty
     for setting in SIM_SETTINGS:
         assert getattr(first, setting) == getattr(second, setting), setting
-    for field in SIM_BUFFERS:
-        np.testing.assert_array_equal(
-            getattr(first, field).to_numpy(), getattr(second, field).to_numpy(), err_msg=field
-        )
+    actual = {field: getattr(first, field).to_numpy() for field in SIM_BUFFERS}
+    expected = {field: getattr(second, field).to_numpy() for field in SIM_BUFFERS}
+    if continued:
+        assert_sim_buffers_equal(actual, expected)
+    else:
+        for field in SIM_BUFFERS:
+            np.testing.assert_array_equal(actual[field], expected[field], err_msg=field)
 
 
 def test_restore_preserves_history_pending_settings_and_future_births_deaths(device, tmp_path):
@@ -78,18 +82,22 @@ def test_restore_preserves_history_pending_settings_and_future_births_deaths(dev
     cursor.apply()
     original.food_energy = 7.25  # The next step must still apply this pending UI setting.
     original.food_per_second = 31.5
+    original.input_mutation_probability = 0.23
+    original.policy_mutation_probability = 0.37
     path = save_snapshot(tmp_path / "resume.npz", original)
     restored = load_snapshot(path, device).sim
     assert_same_state(original, restored)
+    assert restored.input_mutation_probability == 0.23
+    assert restored.policy_mutation_probability == 0.37
     assert restored.inspect_vision(0, 0, age=5) == original.inspect_vision(0, 0, age=5)
 
     advance(original, 25)
     advance(restored, 25)
-    assert_same_state(original, restored)
+    assert_same_state(original, restored, continued=True)
     assert original.inspect_world(0)["births"] > 0
     advance(original, 55)
     advance(restored, 55)
-    assert_same_state(original, restored)
+    assert_same_state(original, restored, continued=True)
     assert original.inspect_world(0)["deaths"] > 0
 
 
@@ -114,7 +122,7 @@ def test_checkpoint_includes_benchmark_worlds_frozen_arrays_and_graph(device, tm
     np.testing.assert_array_equal(restored.arrays["reference_weights"], reference)
     advance(trial, 12)
     advance(restored.extra_sims["benchmark"], 12)
-    assert_same_state(trial, restored.extra_sims["benchmark"])
+    assert_same_state(trial, restored.extra_sims["benchmark"], continued=True)
 
 
 def test_periodic_snapshots_keep_latest_files_and_leave_manual_checkpoint(device, tmp_path):
@@ -148,3 +156,170 @@ def test_restore_rejects_incompatible_gpu_layout(device, tmp_path):
     np.savez_compressed(path, **payload)
     with pytest.raises(ValueError, match="layout no longer matches: creatures"):
         load_snapshot(path, device)
+
+
+def test_legacy_snapshot_restores_existing_state_with_zero_intake_counters(device, tmp_path):
+    original = make_sim(device)
+    advance(original, 3)
+    path = save_snapshot(tmp_path / "legacy.npz", original)
+    with np.load(path, allow_pickle=False) as source:
+        payload = {key: source[key] for key in source.files}
+    manifest = json.loads(str(payload["manifest"]))
+    manifest["version"] = 1
+    for entry in manifest["sims"]:
+        del payload[entry["buffers"].pop("food_energy_totals")]
+    payload["manifest"] = np.array(json.dumps(manifest))
+    np.savez_compressed(path, **payload)
+
+    restored = load_snapshot(path, device).sim
+
+    assert restored.tick == original.tick
+    np.testing.assert_array_equal(restored.food_energy_totals.to_numpy(), 0)
+    for field in SIM_BUFFERS:
+        if field != "food_energy_totals":
+            np.testing.assert_array_equal(
+                getattr(original, field).to_numpy(), getattr(restored, field).to_numpy()
+            )
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_previous_snapshot_versions_retain_live_state_and_intake_counters(
+    device, tmp_path, version
+):
+    original = make_sim(device)
+    advance(original, 3)
+    original.food_energy_totals.copy_from_numpy(
+        np.arange(original.num_worlds * 3, dtype=np.uint64) + 17
+    )
+    path = save_snapshot(tmp_path / f"version-{version}.npz", original)
+    with np.load(path, allow_pickle=False) as source:
+        payload = {key: source[key] for key in source.files}
+    manifest = json.loads(str(payload["manifest"]))
+    manifest["version"] = version
+    payload["manifest"] = np.array(json.dumps(manifest))
+    np.savez_compressed(path, **payload)
+    restored = load_snapshot(path, device).sim
+    assert_same_state(original, restored)
+    advance(original, 2)
+    advance(restored, 2)
+    assert_same_state(original, restored, continued=True)
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_snapshot_without_mutation_settings_keeps_legacy_probabilities(device, tmp_path, version):
+    original = make_sim(
+        device,
+        food_capacity=0,
+        initial_food=0,
+        target_food=0,
+        food_per_second=0,
+        input_mutation_probability=0.01,
+        policy_mutation_probability=0.01,
+    )
+    advance(original, 3)
+    layout = original._initialize.reflection.g_creatures.type_layout.element_type_layout
+    creatures = spy.BufferCursor(layout, original.creatures)
+    for index in (0, original.creature_capacity):
+        creatures[index]["energy"] = creatures[index]["split_energy"].read() * 2
+    creatures.apply()
+    path = save_snapshot(tmp_path / "legacy-policy.npz", original)
+    with np.load(path, allow_pickle=False) as source:
+        payload = {key: source[key] for key in source.files}
+    manifest = json.loads(str(payload["manifest"]))
+    manifest["version"] = version
+    for entry in manifest["sims"]:
+        del entry["settings"]["input_mutation_probability"]
+        del entry["settings"]["policy_mutation_probability"]
+        if version == 1:
+            del payload[entry["buffers"].pop("food_energy_totals")]
+    payload["manifest"] = np.array(json.dumps(manifest))
+    np.savez_compressed(path, **payload)
+
+    restored = load_snapshot(path, device).sim
+
+    assert restored.input_mutation_probability == restored.policy_mutation_probability == 0.01
+    assert_same_state(original, restored)
+    advance(original, 2)
+    advance(restored, 2)
+    assert original.inspect_world(0)["births"] > 0
+    assert_same_state(original, restored, continued=True)
+
+
+def test_version_three_legacy_ids_remain_unique_when_restored_parents_split_into_two(
+    device, tmp_path
+):
+    original = make_sim(
+        device,
+        num_worlds=2,
+        creatures_per_world=2,
+        creature_capacity=4,
+        food_capacity=0,
+        initial_food=0,
+        target_food=0,
+        food_per_second=0,
+        mutation_enabled=False,
+    )
+    original.tick = 10
+    split_counts = (7, 19)
+    parent_generations = (6, 11)
+    total_slots = original.num_worlds * original.creature_capacity
+    layout = original._initialize.reflection.g_creatures.type_layout.element_type_layout
+    creatures = spy.BufferCursor(layout, original.creatures)
+    world_layout = original._initialize.reflection.g_worlds.type_layout.element_type_layout
+    worlds = spy.BufferCursor(world_layout, original.worlds)
+    legacy_guids = {}
+    for world, completed_splits in enumerate(split_counts):
+        worlds[world]["births"] = completed_splits
+        for local in (0, 1):
+            index = world * original.creature_capacity + local
+            # Version 3 issued one identity per split, with the zero-based split
+            # serial and world index interleaved. These are genuine old-scheme
+            # IDs, rather than version-4 offspring saved with an older label.
+            serial = completed_splits - 1 - local
+            guid = total_slots + serial * original.num_worlds + world + 1
+            legacy_guids[index] = guid
+            creatures[index]["guid"] = guid
+            creatures[index]["generation"] = parent_generations[world] - local
+            creatures[index]["birth_tick"] = 4
+            creatures[index]["age_start_tick"] = 4
+            creatures[index]["max_speed"] = 0.0
+            if local == 0:
+                creatures[index]["energy"] = creatures[index]["split_energy"].read() * 2
+    creatures.apply()
+    worlds.apply()
+    path = save_snapshot(tmp_path / "legacy-identities.npz", original)
+    with np.load(path, allow_pickle=False) as source:
+        payload = {key: source[key] for key in source.files}
+    manifest = json.loads(str(payload["manifest"]))
+    manifest["version"] = 3
+    payload["manifest"] = np.array(json.dumps(manifest))
+    np.savez_compressed(path, **payload)
+
+    restored = load_snapshot(path, device).sim
+    assert_same_state(original, restored)
+    for world in range(2):
+        for local in (0, 1):
+            creature = restored.inspect(world, local)
+            assert creature["guid"] == legacy_guids[world * restored.creature_capacity + local]
+            assert creature["generation"] == parent_generations[world] - local
+
+    advance(restored, 1)
+    living_ids = []
+    newborn_ids = []
+    for world, completed_splits in enumerate(split_counts):
+        assert restored.inspect_world(world)["births"] == completed_splits + 1
+        original_parent = legacy_guids[world * restored.creature_capacity]
+        for local in (0, 2):
+            newborn = restored.inspect(world, local)
+            assert newborn["alive"]
+            assert newborn["generation"] == parent_generations[world] + 1
+            assert newborn["parent_guid"] == original_parent
+            assert newborn["birth_tick"] == newborn["age_start_tick"] == 11
+            newborn_ids.append(newborn["guid"])
+        survivor = restored.inspect(world, 1)
+        assert survivor["guid"] == legacy_guids[world * restored.creature_capacity + 1]
+        assert survivor["generation"] == parent_generations[world] - 1
+        living_ids.extend(restored.inspect(world, local)["guid"] for local in (0, 1, 2))
+    assert len(set(newborn_ids)) == 4
+    assert set(newborn_ids).isdisjoint(legacy_guids.values())
+    assert len(set(living_ids)) == 6

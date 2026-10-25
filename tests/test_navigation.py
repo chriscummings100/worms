@@ -236,7 +236,8 @@ def test_pick_passes_world_position_pixel_tolerance_and_follow_context(app):
     )
     assert app.following
     assert app.camera.offset == (20.0, -30.0)
-    app.sim.inspect.assert_not_called()
+    app.sim.inspect.assert_called_once_with(2, 12)
+    assert app.selected_creature == 12 and app.selected_guid == 42
 
 
 def test_empty_space_clears_selected_creature_and_stops_follow(app):

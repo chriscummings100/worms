@@ -1,0 +1,12 @@
+{
+  "python": "3.12.15 | packaged by Anaconda, Inc. | (main, Oct  1 2026, 20:14:50) [MSC v.1942 64 bit (AMD64)]",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "packages": {
+    "slangpy": "0.43.1",
+    "numpy": "2.5.4",
+    "pillow": "13.0.0",
+    "pytest": "9.1.1",
+    "ruff": "0.17.2",
+    "setuptools": "84.0.0"
+  }
+}

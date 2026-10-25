@@ -3,24 +3,36 @@
 import numpy as np
 import slangpy as spy
 
-from .sim import SHADER_DIR, Sim
+from .sim import ENERGY_PER_UNIT, FOOD_ENERGY, FOOD_PER_SECOND, SHADER_DIR, Sim
 
-TRIAL_TICKS = 10_000
+TRIAL_TICKS = 100_000
+REFERENCE_WARMUP_TICKS = 200_000
 SAMPLE_SIZE = 64
+INITIAL_FOOD = 150
+PROTOCOL_VERSION = 6  # Freeze surviving reference brains after the initial 200,000 ticks.
 
 
 class Benchmark:
     """Two trials with swapped starts, fresh bodies, and inherited frozen brains.
 
     Call prepare before recording the frame, then update once per live tick.
-    The only routine readback is six integer counters at a trial boundary.
-    Live slider changes do not alter the reference or the trial environment.
+    Only small population and intake counters are read back at a trial boundary.
+    Live setting changes do not alter the reference or the trial environment.
     """
 
-    def __init__(self, live_sim, *, trial_ticks=TRIAL_TICKS, sample_size=SAMPLE_SIZE):
+    def __init__(
+        self,
+        live_sim,
+        *,
+        trial_ticks=TRIAL_TICKS,
+        sample_size=SAMPLE_SIZE,
+        warmup_ticks=REFERENCE_WARMUP_TICKS,
+    ):
         if trial_ticks < 1 or sample_size < 1 or live_sim.creature_capacity < 2:
             raise ValueError("A benchmark needs a positive duration and room for both cohorts")
         self.trial_ticks = trial_ticks
+        self.warmup_ticks = warmup_ticks
+        self.reference_tick = None
         self.sample_size = min(sample_size, live_sim.creature_capacity // 2)
         self.source_count = live_sim.num_worlds * live_sim.creature_capacity
         self.layout_seed = live_sim.seed ^ 0x6B8B4567
@@ -35,24 +47,25 @@ class Benchmark:
             creature_capacity=live_sim.creature_capacity,
             seed=self.layout_seed,
             food_capacity=live_sim.food_capacity,
-            initial_food=live_sim.initial_food,
+            initial_food=min(INITIAL_FOOD, live_sim.target_food),
             target_food=live_sim.target_food,
-            food_per_second=live_sim.food_per_second,
-            food_energy=live_sim.food_energy,
+            food_per_second=FOOD_PER_SECOND,
+            food_energy=FOOD_ENERGY / ENERGY_PER_UNIT,
             food_age_start=live_sim.food_age_start,
             food_age_fade=live_sim.food_age_fade,
             mutation_enabled=False,
         )
         self._create_resources(live_sim)
+        # Waiting checkpoints must not include uninitialized GPU memory.
         encoder = self.sim.device.create_command_encoder()
-        encoder.copy_buffer(
-            self.reference_creatures, 0, live_sim.creatures, 0, live_sim.creatures.size
-        )
-        encoder.copy_buffer(
-            self.reference_weights, 0, live_sim.brain_weights, 0, live_sim.brain_weights.size
-        )
+        encoder.clear_buffer(self.reference_creatures)
+        encoder.clear_buffer(self.reference_weights)
         self.sim.device.submit_command_buffer(encoder.finish())
-        self._start(live_sim)
+        self.prepare(live_sim)
+
+    @property
+    def ready(self):
+        return self.reference_tick is not None
 
     def _create_resources(self, live_sim):
         device = self.sim.device
@@ -130,20 +143,38 @@ class Benchmark:
         self.pending = False
 
     def prepare(self, live_sim):
-        """Collect a submitted completed trial and launch the next sampled pair."""
+        """Capture the settled reference or collect a submitted trial and start the next."""
+        if not self.ready:
+            if live_sim.tick < self.warmup_ticks:
+                return False
+            # App calls this before recording a frame, so these copies see only
+            # submitted live updates. A batch may cross the threshold slightly.
+            encoder = self.sim.device.create_command_encoder()
+            encoder.copy_buffer(
+                self.reference_creatures, 0, live_sim.creatures, 0, live_sim.creatures.size
+            )
+            encoder.copy_buffer(
+                self.reference_weights, 0, live_sim.brain_weights, 0, live_sim.brain_weights.size
+            )
+            self.sim.device.submit_command_buffer(encoder.finish())
+            self.reference_tick = live_sim.tick
+            self._start(live_sim)
+            return True
         if not self.pending:
             return False
         values = self._counts.to_numpy().view(np.uint32).reshape(-1)
         counts = values[:4].reshape(2, 2)
         current, reference = map(int, counts.sum(axis=0))
-        total = current + reference
+        energy = self.sim.food_energy_totals.to_numpy().view(np.uint64).reshape(2, 3)[:, 1:]
+        current_energy, reference_energy = map(int, energy.sum(axis=0))
+        total_energy = current_energy + reference_energy
         reason = None
         if not values[4]:
             reason = "no_current_population"
         elif not values[5]:
             reason = "no_reference_population"
-        elif not total:
-            reason = "extinction"
+        elif not total_energy:
+            reason = "no_energy_collected"
         self.history.append(
             {
                 "live_tick": self.sample_live_tick,
@@ -151,7 +182,10 @@ class Benchmark:
                 "trial": self.trial,
                 "current": current,
                 "reference": reference,
-                "score": current / total if total else None,
+                "current_energy": current_energy / ENERGY_PER_UNIT,
+                "reference_energy": reference_energy / ENERGY_PER_UNIT,
+                "world_energy": (energy / ENERGY_PER_UNIT).tolist(),
+                "score": current_energy / total_energy if reason is None else None,
                 "world_counts": counts.tolist(),
                 "source_counts": values[4:].tolist(),
                 "reason": reason,
@@ -163,7 +197,7 @@ class Benchmark:
 
     def update(self, encoder):
         """Record one tick, stopping exactly at the trial boundary until prepare."""
-        if self.pending:
+        if not self.ready or self.pending:
             return
         self.sim.update(encoder)
         if self.sim.tick == self.trial_ticks:
@@ -181,7 +215,10 @@ class Benchmark:
     def snapshot_state(self):
         """Read explicit checkpoint extras; the caller also saves self.sim."""
         metadata = {
+            "protocol_version": PROTOCOL_VERSION,
             "trial_ticks": self.trial_ticks,
+            "warmup_ticks": self.warmup_ticks,
+            "reference_tick": self.reference_tick,
             "sample_size": self.sample_size,
             "source_count": self.source_count,
             "layout_seed": self.layout_seed,
@@ -199,11 +236,15 @@ class Benchmark:
 
     @classmethod
     def from_snapshot(cls, live_sim, trial_sim, metadata, arrays):
-        """Resume the same opponent, trial, and graph without restarting either world."""
+        """Resume waiting or an active trial without recapturing the frozen reference."""
+        if metadata.get("protocol_version") != PROTOCOL_VERSION:
+            raise ValueError("Unsupported benchmark protocol; start a new run")
         self = cls.__new__(cls)
         self.sim = trial_sim
         for name in (
             "trial_ticks",
+            "warmup_ticks",
+            "reference_tick",
             "sample_size",
             "source_count",
             "layout_seed",

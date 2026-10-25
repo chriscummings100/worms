@@ -1,0 +1,67 @@
+{
+  "directory": "C:\\dev\\worms\\artifacts\\saved-runs\\20261025T135417Z-000013000000",
+  "snapshot": "C:\\dev\\worms\\artifacts\\saved-runs\\20261025T135417Z-000013000000\\snapshot.npz",
+  "source": "C:\\dev\\worms\\artifacts\\snapshots\\auto-20261025T135105087182Z-tick-000013000000.npz",
+  "sha256": "378bca806376c52c1905872668148a47d3f357381089a2df512978a0cb49d8b1",
+  "bytes": 25365350,
+  "format_version": 4,
+  "live_tick": 13000000,
+  "live_settings": {
+    "num_worlds": 1,
+    "creatures_per_world": 64,
+    "seed": 1,
+    "creature_capacity": 1024,
+    "food_capacity": 8192,
+    "initial_food": 2048,
+    "target_food": 4096,
+    "food_per_second": 10.0,
+    "food_energy": 5.0,
+    "food_age_start": 100000,
+    "food_age_fade": 0,
+    "mutation_enabled": true,
+    "input_mutation_probability": 0.1,
+    "policy_mutation_probability": 0.1
+  },
+  "benchmark_protocol": 6,
+  "reference_tick": 200000,
+  "benchmark_results": 127,
+  "last_result": {
+    "live_tick": 12800445,
+    "completed_live_tick": 12900445,
+    "trial": 126,
+    "current": 628,
+    "reference": 8,
+    "current_energy": 152725.0,
+    "reference_energy": 15120.0,
+    "world_energy": [
+      [
+        76155.0,
+        7740.0
+      ],
+      [
+        76570.0,
+        7380.0
+      ]
+    ],
+    "score": 0.9099168876046352,
+    "world_counts": [
+      [
+        318,
+        4
+      ],
+      [
+        310,
+        4
+      ]
+    ],
+    "source_counts": [
+      341,
+      282
+    ],
+    "reason": null
+  },
+  "git_commit": "3fcbe0788f1eec0ab14e0d9a79716025b25f8218",
+  "source_archive_includes_uncommitted_changes": true,
+  "source_file_count": 60,
+  "source_sha256": "f5b6679aad6646e2dee7cbfdc9b8ce547c33d1ad5e5e41a03ded009af4eb25ef"
+}

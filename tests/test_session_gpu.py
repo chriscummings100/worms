@@ -5,14 +5,17 @@ from copy import deepcopy
 import numpy as np
 import pytest
 
+from tests.gpu_helpers import assert_sim_buffers_equal
 from worms.app import App, main
+from worms.benchmark import PROTOCOL_VERSION, Benchmark
 from worms.snapshots import SIM_BUFFERS, load_snapshot
 
 pytestmark = pytest.mark.gpu
 
 
-def make_app(tmp_path, *, benchmark=True):
-    return App(
+def make_app(tmp_path, *, benchmark=True, warmup_ticks=None):
+    app = App(
+        debug_gpu=True,
         headless=True,
         creatures_per_world=2,
         creature_capacity=8,
@@ -21,6 +24,9 @@ def make_app(tmp_path, *, benchmark=True):
         benchmark=benchmark,
         snapshot_dir=tmp_path,
     )
+    if benchmark and warmup_ticks is not None:
+        app.benchmark = Benchmark(app.sim, warmup_ticks=warmup_ticks)
+    return app
 
 
 def state(app):
@@ -40,11 +46,14 @@ def state(app):
     return values
 
 
-def assert_state(actual, expected):
+def assert_state(actual, expected, *, continued=False):
     assert actual.keys() == expected.keys()
     for field, value in expected.items():
         if field in ("live", "trial", "reference"):
             assert actual[field].keys() == value.keys()
+            if continued and field in ("live", "trial"):
+                assert_sim_buffers_equal(actual[field], value)
+                continue
             for name, array in value.items():
                 np.testing.assert_array_equal(actual[field][name], array, err_msg=f"{field}.{name}")
         else:
@@ -52,7 +61,7 @@ def assert_state(actual, expected):
 
 
 def test_app_restores_pending_trial_and_replays_comparison_without_losing_history(tmp_path):
-    app = make_app(tmp_path)
+    app = make_app(tmp_path, warmup_ticks=0)
     try:
         app.benchmark.trial_ticks = 4
         app.speed = 2
@@ -63,6 +72,8 @@ def test_app_restores_pending_trial_and_replays_comparison_without_losing_histor
         assert app.benchmark.history == []
         app.sim.food_energy = 7.25
         app.sim.food_per_second = 3.5
+        app.sim.input_mutation_probability = 0.19
+        app.sim.policy_mutation_probability = 0.37
         app.selected_creature = 0
         app.refresh_stats()
         app.set_follow(True)
@@ -78,13 +89,98 @@ def test_app_restores_pending_trial_and_replays_comparison_without_losing_histor
         assert app.selected_creature is None and not app.following
         assert app.camera.scale == 1 and app.camera.offset == (0, 0)
         assert app.sim.food_energy == 7.25 and app.sim.food_per_second == 3.5
+        assert app.sim.input_mutation_probability == 0.19
+        assert app.sim.policy_mutation_probability == 0.37
+        assert not app.benchmark.sim.mutation_enabled
         assert_state(state(app), checkpoint)
         app.frame()  # A restored viewer stays paused, including its benchmark steps.
         assert app.sim.tick == 4
         assert app.benchmark.sim.tick == 0
         app.paused = False
         app.run(frames=3)
-        assert_state(state(app), expected)
+        assert_state(state(app), expected, continued=True)
+    finally:
+        app.close()
+
+
+@pytest.mark.parametrize("speed", [3, 4])
+def test_waiting_benchmark_roundtrips_and_captures_only_a_submitted_batch(tmp_path, speed):
+    app = make_app(tmp_path, warmup_ticks=5)
+    try:
+        app.benchmark.trial_ticks = 20
+        app.speed = speed
+        initial_weights = app.sim.brain_weights.to_numpy().copy()
+        app.frame()
+        assert app.sim.tick == speed
+        assert app.benchmark.sim.tick == 0 and not app.benchmark.ready
+        assert app.benchmark.reference_tick is None
+        assert app.benchmark.history == [] and not app.benchmark.pending
+        np.testing.assert_array_equal(
+            app.benchmark.reference_creatures.to_numpy().view(np.uint8), 0
+        )
+        np.testing.assert_array_equal(app.benchmark.reference_weights.to_numpy().view(np.uint8), 0)
+
+        # Distinguish the later reference from the initial random population.
+        weights = initial_weights.copy()
+        weights.view(np.float32).reshape(-1)[0] += 1.0
+        app.sim.brain_weights.copy_from_numpy(weights)
+        app.sim.input_mutation_probability = 0.17
+        app.sim.policy_mutation_probability = 0.29
+        app.sim.food_per_second = 8.5
+        waiting_path = app.snapshot(tmp_path / "waiting.npz")
+        waiting = state(app)
+        assert waiting["benchmark"]["protocol_version"] == PROTOCOL_VERSION
+        assert waiting["benchmark"]["warmup_ticks"] == 5
+        assert waiting["benchmark"]["reference_tick"] is None
+
+        app.frame()
+        app.restore(waiting_path)
+        assert app.paused and app.sim.tick == speed
+        assert not app.benchmark.ready and app.benchmark.reference_tick is None
+        assert app.benchmark.warmup_ticks == 5
+        assert app.sim.input_mutation_probability == 0.17
+        assert app.sim.policy_mutation_probability == 0.29
+        assert app.sim.food_per_second == 8.5
+        assert_state(state(app), waiting)
+        app.frame()
+        assert_state(state(app), waiting)
+
+        app.paused = False
+        app.frame()
+        assert app.sim.tick == 2 * speed
+        # Crossing tick 5 while recording a batch cannot capture unfinished GPU work.
+        assert not app.benchmark.ready and app.benchmark.reference_tick is None
+        assert app.benchmark.sim.tick == 0 and not app.benchmark.pending
+        reference = {
+            "reference_creatures": app.sim.creatures.to_numpy().copy(),
+            "reference_weights": app.sim.brain_weights.to_numpy().copy(),
+        }
+        app.frame()
+        assert app.sim.tick == 3 * speed
+        assert app.benchmark.ready
+        assert app.benchmark.reference_tick == app.benchmark.sample_live_tick == 2 * speed
+        assert app.benchmark.sim.tick == speed
+        assert app.benchmark.history == [] and not app.benchmark.pending
+        for name, expected in reference.items():
+            np.testing.assert_array_equal(getattr(app.benchmark, name).to_numpy(), expected)
+        assert not np.array_equal(app.benchmark.reference_weights.to_numpy(), initial_weights)
+
+        captured_path = app.snapshot(tmp_path / "captured.npz")
+        captured = state(app)
+        app.frame()
+        app.restore(captured_path)
+        assert app.paused and app.benchmark.ready
+        assert app.benchmark.warmup_ticks == 5
+        assert app.benchmark.reference_tick == 2 * speed
+        assert_state(state(app), captured)
+        app.frame()
+        assert_state(state(app), captured)
+        app.paused = False
+        app.frame()
+        assert app.benchmark.reference_tick == 2 * speed
+        assert app.benchmark.sim.tick == 2 * speed
+        for name, expected in reference.items():
+            np.testing.assert_array_equal(getattr(app.benchmark, name).to_numpy(), expected)
     finally:
         app.close()
 
@@ -117,7 +213,7 @@ def test_run_saves_last_submitted_tick_when_it_ends_on_snapshot_boundary(tmp_pat
 
 
 def test_reset_keeps_live_settings_and_restarts_reference_and_checkpoint_schedule(tmp_path):
-    app = make_app(tmp_path)
+    app = make_app(tmp_path, warmup_ticks=0)
     try:
         app.benchmark.trial_ticks = 2
         app.run(frames=3)
@@ -128,6 +224,8 @@ def test_reset_keeps_live_settings_and_restarts_reference_and_checkpoint_schedul
         app.sim.food_per_second = 8.5
         app.sim.food_age_start = 1234
         app.sim.food_age_fade = 56
+        app.sim.input_mutation_probability = 0.17
+        app.sim.policy_mutation_probability = 0.25
         app.speed = 5
         app.paused = True
         app.reset()
@@ -136,18 +234,22 @@ def test_reset_keeps_live_settings_and_restarts_reference_and_checkpoint_schedul
         assert app.snapshots.last_tick == 0
         assert app.benchmark is not previous_benchmark
         assert app.benchmark.history == [] and not app.benchmark.pending
+        assert app.benchmark.warmup_ticks == 200_000
+        assert not app.benchmark.ready and app.benchmark.reference_tick is None
         assert app.benchmark.sim.tick == 0 and app.benchmark.sample_live_tick == 0
         for sim in (app.sim, app.benchmark.sim):
-            assert sim.food_energy == 6.25
-            assert sim.food_per_second == 8.5
             assert sim.food_age_start == 1234
             assert sim.food_age_fade == 56
+        assert app.sim.food_energy == 6.25 and app.sim.food_per_second == 8.5
+        assert app.sim.input_mutation_probability == 0.17
+        assert app.sim.policy_mutation_probability == 0.25
+        assert not app.benchmark.sim.mutation_enabled
+        assert app.benchmark.sim.food_energy == 5 and app.benchmark.sim.food_per_second == 10
+        assert app.benchmark.sim.initial_food == 150
         np.testing.assert_array_equal(
-            app.sim.creatures.to_numpy(), app.benchmark.reference_creatures.to_numpy()
+            app.benchmark.reference_creatures.to_numpy().view(np.uint8), 0
         )
-        np.testing.assert_array_equal(
-            app.sim.brain_weights.to_numpy(), app.benchmark.reference_weights.to_numpy()
-        )
+        np.testing.assert_array_equal(app.benchmark.reference_weights.to_numpy().view(np.uint8), 0)
     finally:
         app.close()
 
@@ -166,6 +268,7 @@ def test_headless_cli_resume_advances_and_explicit_one_speed_overrides_saved_spe
     result = main(
         [
             "--headless",
+            "--gpu-debug",
             "--resume",
             str(path),
             "--no-benchmark",

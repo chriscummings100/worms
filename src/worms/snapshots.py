@@ -17,8 +17,8 @@ import numpy as np
 
 from worms.sim import Sim
 
-FORMAT_VERSION = 1
-SNAPSHOT_INTERVAL = 10_000
+FORMAT_VERSION = 4  # Splitting creates two new identities and independently mutated brains.
+SNAPSHOT_INTERVAL = 100_000
 SNAPSHOT_KEEP = 5
 SIM_BUFFERS = (
     "worlds",
@@ -27,6 +27,7 @@ SIM_BUFFERS = (
     "grid_heads",
     "grid_next",
     "food_credits",
+    "food_energy_totals",
     "food_grid_heads",
     "food_grid_next",
     "vision_frames",
@@ -47,6 +48,8 @@ SIM_SETTINGS = (
     "food_age_start",
     "food_age_fade",
     "mutation_enabled",
+    "input_mutation_probability",
+    "policy_mutation_probability",
 )
 
 
@@ -122,16 +125,27 @@ def load_snapshot(path, device):
     simulations = []
     with np.load(path, allow_pickle=False) as archive:
         manifest = json.loads(str(archive["manifest"]))
-        if manifest["version"] != FORMAT_VERSION:
+        if manifest["version"] not in (1, 2, 3, FORMAT_VERSION):
             raise ValueError(f"Unsupported snapshot version: {manifest['version']}")
         entries = manifest["sims"]
         if not entries or entries[0]["name"] is not None:
             raise ValueError("Snapshot has no live simulation")
         for entry in entries:
-            current = Sim(device, **entry["settings"])
+            # These optional settings do not change saved buffer layouts. Older
+            # files retain their original uniform 1% mutation until changed.
+            settings = {
+                "input_mutation_probability": 0.01,
+                "policy_mutation_probability": 0.01,
+                **entry["settings"],
+            }
+            current = Sim(device, **settings)
             # Validate the complete layout before uploading any checkpoint bytes.
             saved = {}
             for field in SIM_BUFFERS:
+                if manifest["version"] == 1 and field == "food_energy_totals":
+                    # Older checkpoints predate intake counters. Their benchmark
+                    # is restarted separately, retaining the original opponent.
+                    continue
                 value = archive[entry["buffers"][field]]
                 if value.dtype != np.uint8 or value.ndim != 1:
                     raise ValueError(f"Invalid snapshot buffer: {field}")

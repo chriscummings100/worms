@@ -47,28 +47,26 @@ void clear_food_grid(uint3 thread_id : SV_DispatchThreadID)
         food_grid_heads[index] = -1;
 }
 
-// Each world has one owner, matching the creature grid's serial insertion.
+// Food slots insert independently; capture starts after every link is written.
 [shader("compute")]
-[numthreads(1, 1, 1)]
+[numthreads(64, 1, 1)]
 void build_food_grid(uint3 thread_id : SV_DispatchThreadID)
 {
-    uint world_index = thread_id.x;
-    if (world_index >= num_worlds)
+    uint index = thread_id.x;
+    if (index >= num_worlds * food_capacity)
         return;
-    uint food_base = world_index * food_capacity;
+    food_grid_next[index] = -1;
+    Food food = g_food[index];
+    if (food.energy == 0u)
+        return;
+
+    uint world_index = index / food_capacity;
     uint grid_base = world_index * GRID_CELL_COUNT;
-    for (uint local_index = 0; local_index < food_capacity; ++local_index)
-    {
-        uint index = food_base + local_index;
-        food_grid_next[index] = -1;
-        Food food = g_food[index];
-        if (food.energy == 0u)
-            continue;
-        uint2 cell = vision_cell_at(food.position);
-        uint head = grid_base + cell.y * GRID_SIZE + cell.x;
-        food_grid_next[index] = food_grid_heads[head];
-        food_grid_heads[head] = int(index);
-    }
+    uint2 cell = vision_cell_at(food.position);
+    uint head = grid_base + cell.y * GRID_SIZE + cell.x;
+    int previous;
+    InterlockedExchange(food_grid_heads[head], int(index), previous);
+    food_grid_next[index] = previous;
 }
 
 // Screen/world y increases downward, so positive bearings turn clockwise.
@@ -104,26 +102,24 @@ bool nearer_object(VisionSlot previous, int previous_index, float distance, uint
 [numthreads(64, 1, 1)]
 void capture_vision(uint3 thread_id : SV_DispatchThreadID)
 {
-    uint index = thread_id.x;
+    uint index = thread_id.x / VISION_SLOTS;
+    uint segment = thread_id.x % VISION_SLOTS;
     uint creature_count = num_worlds * creatures_per_world;
     if (index >= creature_count)
         return;
 
     Creature observer = g_creatures[index];
     uint frame_index = (tick % VISION_HISTORY) * creature_count + index;
-    VisionFrame frame;
-    frame.position = observer.position;
-    frame.heading = observer.heading;
-    frame.tick = observer.alive ? int(tick) : -1;
-    vision_frames[frame_index] = frame;
-
-    VisionSlot slots[VISION_SLOTS] = {};
-    int nearest_index[VISION_SLOTS] = {};
-    for (uint segment = 0; segment < VISION_SLOTS; ++segment)
+    if (segment == 0u)
     {
-        slots[segment] = empty_vision_slot();
-        nearest_index[segment] = -1;
+        VisionFrame frame;
+        frame.position = observer.position;
+        frame.heading = observer.heading;
+        frame.tick = observer.alive ? int(tick) : -1;
+        vision_frames[frame_index] = frame;
     }
+    VisionSlot slot = empty_vision_slot();
+    int nearest_index = -1;
 
     if (observer.alive)
     {
@@ -131,12 +127,30 @@ void capture_vision(uint3 thread_id : SV_DispatchThreadID)
         uint grid_base = world_index * GRID_CELL_COUNT;
         int2 origin_cell = int2(vision_cell_at(observer.position));
         float2 forward = float2(cos(observer.heading), sin(observer.heading));
+        float lower_angle = observer.heading - VISION_FOV * 0.5
+            + float(segment) * (VISION_FOV / float(VISION_SLOTS));
+        float upper_angle = lower_angle + VISION_FOV / float(VISION_SLOTS);
+        float2 lower_edge = float2(cos(lower_angle), sin(lower_angle));
+        float2 upper_edge = float2(cos(upper_angle), sin(upper_angle));
+        float2 origin_in_cell = observer.position
+            - GRID_CELL_SIZE * floor(observer.position / GRID_CELL_SIZE);
+        // A circle enclosing the cell makes wedge/range rejection conservative,
+        // including cells crossing angular boundaries and the world seams.
+        // Padding covers float rounding; exact point tests below decide visibility.
+        float cell_radius = GRID_CELL_SIZE * 0.7071067811865475 + 0.0001;
+        float cell_range = VISION_RANGE + cell_radius;
         // 24 m / 4 m = six cells each way. Every wrapped cell is visited once.
         int reach = int(ceil(VISION_RANGE / GRID_CELL_SIZE));
         for (int y = -reach; y <= reach; ++y)
         {
             for (int x = -reach; x <= reach; ++x)
             {
+                float2 cell_delta = (float2(x, y) + 0.5) * GRID_CELL_SIZE - origin_in_cell;
+                float from_lower = lower_edge.x * cell_delta.y - lower_edge.y * cell_delta.x;
+                float from_upper = upper_edge.x * cell_delta.y - upper_edge.y * cell_delta.x;
+                if (dot(cell_delta, cell_delta) > cell_range * cell_range
+                    || from_lower < -cell_radius || from_upper > cell_radius)
+                    continue;
                 int2 cell = (origin_cell + int2(x, y) + int(GRID_SIZE)) % int(GRID_SIZE);
                 uint head = grid_base + uint(cell.y) * GRID_SIZE + uint(cell.x);
                 int food_index = food_grid_heads[head];
@@ -145,19 +159,17 @@ void capture_vision(uint3 thread_id : SV_DispatchThreadID)
                     Food food = g_food[food_index];
                     float distance;
                     float bearing;
-                    int segment = vision_segment(food.position, observer.position, forward, distance, bearing);
-                    if (food.energy > 0u && segment >= 0)
+                    int found_segment = vision_segment(food.position, observer.position, forward, distance, bearing);
+                    if (food.energy > 0u && found_segment == int(segment))
                     {
-                        VisionSlot slot = slots[segment];
-                        if (nearer_object(slot, nearest_index[segment], distance, VISION_FOOD, food_index))
+                        if (nearer_object(slot, nearest_index, distance, VISION_FOOD, food_index))
                         {
-                            nearest_index[segment] = food_index;
+                            nearest_index = food_index;
                             slot.distance = distance;
                             slot.bearing = bearing;
                             slot.size = 2.0 * FOOD_RADIUS;
                             slot.food_energy = float(food.energy) / float(ENERGY_PER_UNIT);
                             slot.kind = VISION_FOOD;
-                            slots[segment] = slot;
                         }
                     }
                     food_index = food_grid_next[food_index];
@@ -171,19 +183,17 @@ void capture_vision(uint3 thread_id : SV_DispatchThreadID)
                     {
                         float distance;
                         float bearing;
-                        int segment = vision_segment(creature.position, observer.position, forward, distance, bearing);
-                        if (segment >= 0)
+                        int found_segment = vision_segment(creature.position, observer.position, forward, distance, bearing);
+                        if (found_segment == int(segment))
                         {
-                            VisionSlot slot = slots[segment];
-                            if (nearer_object(slot, nearest_index[segment], distance, VISION_CREATURE, creature_index))
+                            if (nearer_object(slot, nearest_index, distance, VISION_CREATURE, creature_index))
                             {
-                                nearest_index[segment] = creature_index;
+                                nearest_index = creature_index;
                                 slot.distance = distance;
                                 slot.bearing = bearing;
                                 slot.size = 2.0 * creature.radii.x;
                                 slot.food_energy = 0.0;
                                 slot.kind = VISION_CREATURE;
-                                slots[segment] = slot;
                             }
                         }
                     }
@@ -193,6 +203,5 @@ void capture_vision(uint3 thread_id : SV_DispatchThreadID)
         }
     }
 
-    for (uint segment = 0; segment < VISION_SLOTS; ++segment)
-        vision_history[frame_index * VISION_SLOTS + segment] = slots[segment];
+    vision_history[frame_index * VISION_SLOTS + segment] = slot;
 }

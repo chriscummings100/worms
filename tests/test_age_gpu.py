@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from tests.gpu_helpers import fixed_brains
+from tests.gpu_helpers import fixed_brains, grid_membership
 from tests.test_contact_gpu import creature_energies, cursor_for, food_records, write_food
 from tests.test_lifecycle_gpu import stage
 from worms.app import App
@@ -15,6 +15,7 @@ pytestmark = pytest.mark.gpu
 @pytest.fixture(scope="module")
 def app():
     application = App(
+        debug_gpu=True,
         headless=True,
         benchmark=False,
         snapshot_dir=None,
@@ -100,11 +101,14 @@ def test_expiry_kills_without_food_despite_reserves_before_it_can_split(app):
     assert creature["velocity"] == (0, 0)
     assert creature["age_start_tick"] == 0
     assert not sim.inspect(0, 1)["alive"]
-    assert sim.inspect_vision(0, 0) is None
+    assert sim.inspect_vision(0, 0)["tick"] == 100_000
     np.testing.assert_array_equal(sim.brain_activations.to_numpy().view(np.float32), 0)
-    np.testing.assert_array_equal(sim.grid_heads.to_numpy().view(np.int32), -1)
+    assert grid_membership(sim.grid_heads.to_numpy(), sim.grid_next.to_numpy()) == [{(25, 25): {0}}]
     for _ in range(3):
         sim.update()
+    assert sim.inspect_vision(0, 0) is None
+    assert sim.inspect_vision(0, 0, age=3)["tick"] == 100_000
+    np.testing.assert_array_equal(sim.grid_heads.to_numpy().view(np.int32), -1)
     world = sim.inspect_world(0)
     assert (world["num_creatures"], world["births"], world["deaths"]) == (0, 0, 1)
 
@@ -151,7 +155,7 @@ def test_collected_energy_is_summed_before_age_rounding_without_integer_overflow
     assert sim.inspect_world(0)["num_food"] == 0
 
 
-def test_splitting_resets_parent_and_child_age_and_restores_full_intake(app):
+def test_splitting_creates_two_new_lifetimes_with_full_intake(app):
     sim = make_sim(app, capacity=2, food=2)
     stage(sim, 0, energy=2 * INITIAL_ENERGY + 10)
     fixed_brains(sim, movement=0)
@@ -159,14 +163,17 @@ def test_splitting_resets_parent_and_child_age_and_restores_full_intake(app):
     creatures[0]["birth_tick"] = 123
     creatures[0]["age_start_tick"] = 123
     creatures.apply()
+    original_guid = sim.inspect(0, 0)["guid"]
     write_food(sim, [(300, 300)] * 2, [0, 0])
     sim.tick = 99_998
 
     sim.update()
 
     parent, child = [sim.inspect(0, index) for index in range(2)]
-    assert parent["birth_tick"] == 123
-    assert child["birth_tick"] == 99_999 and child["parent_guid"] == parent["guid"]
+    assert parent["guid"] != original_guid and child["guid"] != original_guid
+    assert parent["guid"] != child["guid"]
+    assert parent["birth_tick"] == child["birth_tick"] == 99_999
+    assert parent["parent_guid"] == child["parent_guid"] == original_guid
     assert parent["age_start_tick"] == child["age_start_tick"] == sim.tick
     assert sim.inspect_world(0)["births"] == 1
     # Hold both in place with a fresh cost remainder to isolate their intake.
@@ -179,11 +186,11 @@ def test_splitting_resets_parent_and_child_age_and_restores_full_intake(app):
     parent, child = [sim.inspect(0, index) for index in range(2)]
     assert parent["alive"] and child["alive"]
     assert parent["energy"] == child["energy"] == INITIAL_ENERGY + FOOD_ENERGY
-    assert parent["birth_tick"] == 123 and child["birth_tick"] == 99_999
+    assert parent["birth_tick"] == child["birth_tick"] == 99_999
     assert sim.tick - parent["age_start_tick"] == sim.tick - child["age_start_tick"] == 1
     np.testing.assert_array_equal(food_records(sim)["energy"], 0)
 
-    sim.tick = 100_122  # The parent's original age limit was birth tick 123 + 100,000.
+    sim.tick = 100_122  # The retired parent's lifespan does not apply to either child.
     sim.update()
     assert all(sim.inspect(0, index)["alive"] for index in range(2))
     assert sim.inspect_world(0)["deaths"] == 0

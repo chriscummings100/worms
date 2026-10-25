@@ -55,14 +55,17 @@ class App:
         benchmark=True,
         snapshot_dir=Path("artifacts/snapshots"),
         resume=None,
+        debug_gpu=False,
     ):
         adapter = next(
             a for a in spy.Device.enumerate_adapters(spy.DeviceType.d3d12) if "NVIDIA" in a.name
         )
+        self.debug_gpu = debug_gpu
         self.device = spy.Device(
             type=spy.DeviceType.d3d12,
             adapter_luid=adapter.luid,
-            enable_debug_layers=True,
+            enable_debug_layers=debug_gpu,
+            enable_rhi_validation=debug_gpu,
             compiler_options={"include_paths": [Path(__file__).parent / "shaders"]},
         )
         self.sim = Sim(
@@ -72,7 +75,12 @@ class App:
         self.snapshots = PeriodicSnapshots(snapshot_dir) if snapshot_dir is not None else None
         self._snapshot_requested = False
         self._restore_requested = False
-        self.snapshot_status = "Automatic snapshots every 10,000 ticks (keep 5)"
+        self.snapshot_status = (
+            f"Automatic snapshots every {self.snapshots.interval:,} ticks "
+            f"(keep {self.snapshots.keep})"
+            if self.snapshots is not None
+            else ""
+        )
         self.show_comparison = False
         self.brain_view = BrainView(self.device)
         self.comparison_view = ComparisonView(self.device, self.brain_view.background)
@@ -108,6 +116,44 @@ class App:
         self._next_stats_update = 0.0
         self._next_population_update = 0.0
         self.fit_world()
+
+    @property
+    def viewing_benchmark(self):
+        return self.selected_world is not None and self.selected_world >= self.sim.num_worlds
+
+    @property
+    def view_sim(self):
+        return self.benchmark.sim if self.viewing_benchmark else self.sim
+
+    @property
+    def view_world(self):
+        return (
+            self.selected_world - self.sim.num_worlds
+            if self.viewing_benchmark
+            else self.selected_world
+        )
+
+    def world_choices(self):
+        choices = ["All live worlds"] + [f"World {i + 1}" for i in range(self.sim.num_worlds)]
+        if self.benchmark is not None and self.benchmark.ready:
+            choices += ["Benchmark A", "Benchmark B"]
+        return choices
+
+    def comparison_status(self):
+        benchmark = self.benchmark
+        if benchmark is None:
+            return "Comparison disabled"
+        if not benchmark.ready:
+            return (
+                "Waiting to capture baseline\n"
+                f"Live tick {self.sim.tick:,}/{benchmark.warmup_ticks:,}"
+            )
+        latest = benchmark.history[-1] if benchmark.history else None
+        return (
+            f"Baseline captured at live tick {benchmark.reference_tick:,}\n"
+            f"Benchmark {benchmark.sim.tick:,}/{benchmark.trial_ticks:,} ticks\n"
+            f"{comparison_result(latest)}"
+        )
 
     def fit_world(self):
         self.following = False
@@ -197,8 +243,8 @@ class App:
         rect = self.focused_rect()
         if rect is None or not contains(rect, point):
             return
-        selected = self.sim.pick(
-            self.selected_world,
+        selected = self.view_sim.pick(
+            self.view_world,
             self.camera.screen_to_world(point, rect),
             tolerance=5 / self.camera.pixels_per_unit(rect),
             selected=self.selected_creature if self.selected_creature is not None else -1,
@@ -207,7 +253,13 @@ class App:
             follow=self.following,
         )
         if selected == self.selected_creature:
-            return
+            if selected is None:
+                return
+            # A split can replace the selected creature between inspector polls.
+            # A click on its old slot selects the new identity explicitly.
+            self.refresh_stats()
+            if selected == self.selected_creature:
+                return
         self.set_follow(False)
         self.selected_creature = selected
         self.selected_guid = 0
@@ -216,7 +268,7 @@ class App:
             self.refresh_stats()
 
     def refresh_stats(self):
-        stats = self.sim.inspect(self.selected_world, self.selected_creature)
+        stats = self.view_sim.inspect(self.view_world, self.selected_creature)
         if not stats["alive"] or (self.selected_guid and stats["guid"] != self.selected_guid):
             # A slot can be reused between inspector polls. Keep the last known
             # position, and never silently transfer selection to its newborn.
@@ -232,16 +284,15 @@ class App:
         self._next_stats_update = monotonic() + 0.2
 
     def refresh_population(self):
-        worlds = (
-            range(self.sim.num_worlds) if self.selected_world is None else [self.selected_world]
-        )
-        records = [self.sim.inspect_world(world) for world in worlds]
+        sim = self.view_sim
+        worlds = range(sim.num_worlds) if self.selected_world is None else [self.view_world]
+        records = [sim.inspect_world(world) for world in worlds]
         self.population_stats = {
             field: sum(record[field] for record in records)
             for field in ("num_creatures", "births", "deaths", "num_food")
         }
-        self.population_stats["capacity"] = len(records) * self.sim.creature_capacity
-        self.population_stats["food_target"] = len(records) * self.sim.target_food
+        self.population_stats["capacity"] = len(records) * sim.creature_capacity
+        self.population_stats["food_target"] = len(records) * sim.target_food
         self._next_population_update = monotonic() + 0.2
 
     def clear_selection(self):
@@ -298,7 +349,11 @@ class App:
 
     def reset(self):
         self._reset = True
-        self.selected_world = self.selected_world
+        self.selected_world = (
+            (0 if self.sim.num_worlds == 1 else None)
+            if self.viewing_benchmark
+            else self.selected_world
+        )
 
     def _snapshot_state(self):
         metadata = {"speed": self.speed, "paused": self.paused}
@@ -341,9 +396,16 @@ class App:
             self.snapshots.reset(self.sim.tick)
         self.snapshot_status = f"Restored tick {self.sim.tick:,} (paused)"
         if self.window is not None:
-            self.window.world_selector.items = ["All worlds"] + [
-                f"World {i + 1}" for i in range(self.sim.num_worlds)
-            ]
+            self.window.world_selector.items = self.world_choices()
+
+    def _prepare_benchmark(self):
+        if self.benchmark is not None and self.benchmark.prepare(self.sim):
+            if self.viewing_benchmark:
+                # Trials reuse slots and initial IDs. Never transfer selection
+                # or follow from a previous trial into a newly sampled cohort.
+                self.selected_world = self.selected_world
+            return True
+        return False
 
     def update(self, encoder):
         # Checkpoint/benchmark readbacks only see work submitted by the previous
@@ -358,8 +420,8 @@ class App:
                 self.benchmark = Benchmark(self.sim)
             if self.snapshots is not None:
                 self.snapshots.reset()
-        elif self.benchmark is not None:
-            self.benchmark.prepare(self.sim)
+        else:
+            self._prepare_benchmark()
         if self.snapshots is not None and (
             self._snapshot_requested or self.snapshots.due(self.sim.tick)
         ):
@@ -384,7 +446,8 @@ class App:
         self.frame_count += 1
 
     def render(self, encoder):
-        self.sim.prepare_render(encoder)
+        sim = self.view_sim
+        sim.prepare_render(encoder)
         brain_rect = self.brain_rect()
         if brain_rect is not None and brain_rect[2] > 0 and brain_rect[3] > 0:
             self.brain_view.prepare(encoder, brain_rect)
@@ -407,12 +470,12 @@ class App:
         ) as render_pass:
             for world, rect in self.views():
                 if self.selected_world is None:
-                    self.sim.render(render_pass, rect, world)
+                    sim.render(render_pass, rect, world)
                 else:
-                    self.sim.render(
+                    sim.render(
                         render_pass,
                         rect,
-                        world,
+                        self.view_world,
                         offset=self.camera.offset,
                         scale=self.camera.scale,
                         selected=(
@@ -427,9 +490,9 @@ class App:
                 self.brain_view.render(
                     render_pass,
                     brain_rect,
-                    self.sim.brain_activations,
-                    self.sim.creatures,
-                    self.selected_world * self.sim.creature_capacity + self.selected_creature,
+                    sim.brain_activations,
+                    sim.creatures,
+                    self.view_world * sim.creature_capacity + self.selected_creature,
                     self.selected_guid,
                 )
             if graph_rect is not None and graph_rect[2] > 0 and graph_rect[3] > 0:
@@ -452,8 +515,7 @@ class App:
         else:
             for _ in range(120 if frames is None else frames):
                 self.frame()
-        if self.benchmark is not None:
-            self.benchmark.prepare(self.sim)
+        self._prepare_benchmark()
         if self.snapshots is not None and self.snapshots.due(self.sim.tick):
             self.snapshot()
 
@@ -501,21 +563,22 @@ class _Window(spy.AppWindow):
         self.world_selector = spy.ui.ComboBox(
             panel,
             label="",
-            items=["All worlds"] + [f"World {i + 1}" for i in range(owner.sim.num_worlds)],
+            items=owner.world_choices(),
             callback=lambda value: setattr(owner, "selected_world", value - 1 if value else None),
         )
         self.world_selector.value = (
             owner.selected_world + 1 if owner.selected_world is not None else 0
         )
-        self.status = spy.ui.Text(panel, text="Alive 0/0  Born 0  Died 0\nFood 0/0")
-        self.food_respawn = spy.ui.SliderFloat(
+        self.view_info = spy.ui.Text(panel, text="")
+        self.status = spy.ui.Text(panel, text="Alive 0/0  Splits 0  Died 0\nFood 0/0")
+        self.food_respawn = spy.ui.InputFloat(
             panel,
-            label="Food respawn",
+            label="Food respawn (/s/world)",
             value=owner.sim.food_per_second,
-            min=0.0,
-            max=256.0,
-            format="%.1f /s/world",
-            callback=lambda value: setattr(owner.sim, "food_per_second", value),
+            step=0.1,
+            step_fast=1.0,
+            format="%.2f",
+            callback=lambda value: setattr(owner.sim, "food_per_second", max(0.0, value)),
         )
         self.fit = spy.ui.Button(panel, label="Fit world", callback=owner.fit_world)
         self.food_energy = spy.ui.SliderFloat(
@@ -544,6 +607,28 @@ class _Window(spy.AppWindow):
             max=100000,
             format="%d ticks",
             callback=lambda value: setattr(owner.sim, "food_age_fade", value),
+        )
+        self.input_mutation = spy.ui.InputFloat(
+            panel,
+            label="Input-weight mutation (%)",
+            value=owner.sim.input_mutation_probability * 100,
+            step=0.1,
+            step_fast=1.0,
+            format="%.2f",
+            callback=lambda value: setattr(
+                owner.sim, "input_mutation_probability", min(1.0, max(0.0, value / 100))
+            ),
+        )
+        self.policy_mutation = spy.ui.InputFloat(
+            panel,
+            label="Bias/output mutation (%)",
+            value=owner.sim.policy_mutation_probability * 100,
+            step=0.1,
+            step_fast=1.0,
+            format="%.2f",
+            callback=lambda value: setattr(
+                owner.sim, "policy_mutation_probability", min(1.0, max(0.0, value / 100))
+            ),
         )
         self.comparison_toggle = spy.ui.CheckBox(
             panel,
@@ -609,30 +694,42 @@ class _Window(spy.AppWindow):
             limit = app.world_bottom() if panel is self.inspector else bottom
             available_height = max(1, limit - panel.position.y - 8)
             if panel.size.y > available_height:
-                panel.size = spy.float2(0, available_height)
+                panel.size = spy.float2(panel.size.x, available_height)
         app.update(context.command_encoder)
         app.render(context.command_encoder)
         context.command_encoder.blit(context.surface_texture, app.texture)
         self.speed_selector.value = 0 if app.paused else SIM_SPEEDS.index(app.speed) + 1
+        choices = app.world_choices()
+        if self.world_selector.items != choices:
+            self.world_selector.items = choices
         self.world_selector.value = app.selected_world + 1 if app.selected_world is not None else 0
         self.fit.enabled = app.selected_world is not None
-        self.panel.title = f"Worms | Tick {app.sim.tick}###controls"
+        sim = app.view_sim
+        label = choices[app.selected_world + 1] if app.viewing_benchmark else "Worms"
+        self.panel.title = f"{label} | Tick {sim.tick}###controls"
+        self.view_info.visible = app.viewing_benchmark
+        self.view_info.text = (
+            "Teal: current / Orange: baseline\nFixed benchmark settings; mutation disabled"
+        )
         self.fit.label = f"Fit world ({app.camera.scale:.1f}x)"
-        self.food_respawn.value = app.sim.food_per_second
-        self.food_energy.value = app.sim.food_energy
-        self.food_age_start.value = app.sim.food_age_start
-        self.food_age_fade.value = app.sim.food_age_fade
+        for control in (
+            self.food_respawn,
+            self.food_energy,
+            self.food_age_start,
+            self.food_age_fade,
+            self.input_mutation,
+            self.policy_mutation,
+        ):
+            control.enabled = not app.viewing_benchmark
+        self.food_respawn.value = sim.food_per_second
+        self.food_energy.value = sim.food_energy
+        self.food_age_start.value = sim.food_age_start
+        self.food_age_fade.value = sim.food_age_fade
+        self.input_mutation.value = sim.input_mutation_probability * 100
+        self.policy_mutation.value = sim.policy_mutation_probability * 100
         self.comparison_toggle.value = app.show_comparison
         self.comparison_toggle.enabled = app.benchmark is not None
-        if app.benchmark is not None:
-            benchmark = app.benchmark
-            latest = benchmark.history[-1] if benchmark.history else None
-            result = comparison_result(latest)
-            self.comparison_status.text = (
-                f"Benchmark {benchmark.sim.tick:,}/{benchmark.trial_ticks:,} ticks\n{result}"
-            )
-        else:
-            self.comparison_status.text = "Comparison disabled"
+        self.comparison_status.text = app.comparison_status()
         self.save_snapshot.enabled = app.snapshots is not None
         self.restore_snapshot.enabled = (
             app.snapshots is not None and app.snapshots.latest is not None
@@ -642,7 +739,7 @@ class _Window(spy.AppWindow):
         if population is not None:
             self.status.text = (
                 f"Alive {population['num_creatures']}/{population['capacity']}"
-                f"  Born {population['births']}  Died {population['deaths']}"
+                f"  Splits {population['births']}  Died {population['deaths']}"
                 f"\nFood {population['num_food']}/{population['food_target']}"
             )
         stats = app.creature_stats
@@ -651,16 +748,20 @@ class _Window(spy.AppWindow):
                 self.inspector.position = spy.float2(max(16, app.texture.width - 356), 16)
                 self.inspector.size = spy.float2(0, 0)
             self.follow.value = app.following
-            age = app.sim.tick - stats["age_start_tick"]
+            age = sim.tick - stats["age_start_tick"]
             food_intake = (
-                float(age < app.sim.food_age_start)
-                if app.sim.food_age_fade == 0
-                else max(
-                    0.0, min(1.0, 1.0 - (age - app.sim.food_age_start) / app.sim.food_age_fade)
-                )
+                float(age < sim.food_age_start)
+                if sim.food_age_fade == 0
+                else max(0.0, min(1.0, 1.0 - (age - sim.food_age_start) / sim.food_age_fade))
+            )
+            cohort = (
+                f"Cohort: {'Current' if stats['lineage'] == 1 else 'Baseline'}\n"
+                if app.viewing_benchmark
+                else ""
             )
             self.stats.text = (
                 f"ID {stats['guid']}  Gen {stats['generation']}\n"
+                f"{cohort}"
                 f"Parent {stats['parent_guid'] or '-'}\n"
                 f"Age {age} ticks\n"
                 f"Food intake {food_intake:.0%}\n"
@@ -680,6 +781,9 @@ class _Window(spy.AppWindow):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--gpu-debug", action="store_true", help="Enable D3D12 and SlangPy GPU validation"
+    )
     parser.add_argument("--worlds", type=int, default=1)
     parser.add_argument("--creatures", type=int, default=64, help="Creatures per world")
     parser.add_argument("--frames", type=int, help="Frames before exit; headless defaults to 120")
@@ -704,6 +808,7 @@ def main(argv=None):
         benchmark=not args.no_benchmark,
         snapshot_dir=None if args.no_snapshots else args.snapshot_dir,
         resume=resume,
+        debug_gpu=args.gpu_debug,
     )
     try:
         if args.speed is not None:

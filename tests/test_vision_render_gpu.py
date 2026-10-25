@@ -16,6 +16,7 @@ pytestmark = pytest.mark.gpu
 @pytest.fixture(scope="module")
 def app():
     application = App(
+        debug_gpu=True,
         headless=True,
         benchmark=False,
         snapshot_dir=None,

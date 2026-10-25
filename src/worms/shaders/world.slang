@@ -18,7 +18,7 @@ public struct Creature
     public int64_t parent_guid;
     public uint generation;
     public uint birth_tick;
-    public uint age_start_tick; // Birth or most recent successful split.
+    public uint age_start_tick; // Birth; legacy checkpoints may retain a parent's age reset.
     public float energy_remainder;
     public uint lineage; // Benchmark cohort; inherited unchanged when splitting.
 }
@@ -30,7 +30,7 @@ public struct World
     public uint food_cursor;
     public uint food_spawn_serial;
     public float max_radius;
-    public uint births;
+    public uint births; // Completed splits: one parent is replaced by two offspring.
     public uint deaths;
 }
 
@@ -54,6 +54,7 @@ public static const uint GRID_CELL_COUNT = GRID_SIZE * GRID_SIZE;
 
 RWStructuredBuffer<Creature> g_creatures;
 RWStructuredBuffer<World> g_worlds;
+RWStructuredBuffer<uint64_t> food_energy_totals;
 StructuredBuffer<float> brain_activations;
 uint num_worlds;
 uint creatures_per_world;
@@ -101,6 +102,9 @@ void initialize(uint3 thread_id : SV_DispatchThreadID)
         world.food_spawn_serial = initial_food;
         world.max_radius = 0.0;
         g_worlds[index] = world;
+        // Cumulative actual intake, independent of deaths and slot reuse.
+        for (uint cohort = 0u; cohort < 3u; ++cohort)
+            food_energy_totals[3u * index + cohort] = uint64_t(0);
     }
     if (index >= num_worlds * creatures_per_world)
         return;

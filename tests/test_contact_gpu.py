@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from tests.gpu_helpers import fixed_brains
+from tests.gpu_helpers import fixed_brains, grid_membership
 from worms.app import App
 from worms.sim import FOOD_ENERGY, GRID_CELL_SIZE, GRID_SIZE, INITIAL_ENERGY, Sim
 
@@ -14,6 +14,7 @@ pytestmark = pytest.mark.gpu
 @pytest.fixture(scope="module")
 def app():
     application = App(
+        debug_gpu=True,
         headless=True,
         benchmark=False,
         snapshot_dir=None,
@@ -82,29 +83,41 @@ def food_records(sim):
 
 
 def grid_contents(sim):
-    heads = sim.grid_heads.to_numpy().view(np.int32).reshape(sim.num_worlds, GRID_SIZE**2)
-    links = sim.grid_next.to_numpy().view(np.int32).reshape(-1)
+    return grid_membership(sim.grid_heads.to_numpy(), sim.grid_next.to_numpy())
+
+
+def detect_contacts(sim):
+    encoder = sim.device.create_command_encoder()
+    sim._update_grid(encoder)
+    sim._update_food_grid(encoder)
+    sim._detect_contacts(encoder)
+    sim.device.submit_command_buffer(encoder.finish())
+
+
+def resolve_contacts(sim):
+    encoder = sim.device.create_command_encoder()
+    sim._resolve_contacts(encoder)
+    sim.device.submit_command_buffer(encoder.finish())
+
+
+def contact_queues(sim):
+    counts = sim.food_contact_counts.to_numpy().view(np.uint32).reshape(-1)
+    queue = (
+        sim.food_contact_queue.to_numpy().view(np.uint32).reshape(sim.num_worlds, sim.food_capacity)
+    )
+    np.testing.assert_array_equal(sim.food_contact_overflow.to_numpy().view(np.uint32), 0)
+    assert np.all(counts <= sim.food_capacity)
     result = []
-    for world in range(sim.num_worlds):
-        start = world * sim.creature_capacity
-        cells = {}
-        seen = set()
-        for cell in np.flatnonzero(heads[world] >= 0):
-            members = set()
-            index = int(heads[world, cell])
-            while index != -1:
-                # Fail on cross-world links, duplicate insertions and cycles.
-                assert start <= index < start + sim.creature_capacity
-                assert index not in seen
-                seen.add(index)
-                members.add(index)
-                index = int(links[index])
-            cells[(int(cell) % GRID_SIZE, int(cell) // GRID_SIZE)] = members
-        result.append(cells)
+    for world, count in enumerate(counts):
+        entries = queue[world, :count]
+        assert len(set(map(int, entries))) == count
+        assert np.all(entries >= world * sim.food_capacity)
+        assert np.all(entries < (world + 1) * sim.food_capacity)
+        result.append(entries.copy())
     return result
 
 
-def test_serial_grid_keeps_worlds_separate_and_rebuilds_without_dead_or_stale_entries(app):
+def test_grid_keeps_worlds_separate_and_rebuilds_without_dead_or_stale_entries(app):
     sim = Sim(
         app.device,
         num_worlds=3,
@@ -134,6 +147,97 @@ def test_serial_grid_keeps_worlds_separate_and_rebuilds_without_dead_or_stale_en
     np.testing.assert_array_equal(links[np.logical_not(alive)], -1)
 
 
+def test_parallel_grids_keep_crowded_sparse_slots_and_reset_radius_after_death_and_reuse(app):
+    # Odd capacities cross several thread groups and put each world's last slot
+    # in a different group lane. Each occupied cell has more than 64 entries.
+    sim = Sim(
+        app.device,
+        num_worlds=3,
+        creatures_per_world=0,
+        creature_capacity=257,
+        food_capacity=259,
+        initial_food=0,
+        target_food=259,
+        food_per_second=0,
+    )
+    positions = [(1, 1)] * 257 + [(511.9, 511.9)] * 257 + [(1, 1)] * 257
+    alive = [index % 3 != 0 for index in range(257)] * 2 + [False] * 257
+    write_creatures(sim, positions, alive=alive)
+    creatures = cursor_for(sim, "creatures")
+    creatures[256]["radii"] = spy.float2(12, 1)
+    creatures[513]["radii"] = spy.float2(1, 7)
+    creatures.apply()
+    food_positions = [(2, 2)] * 259 + [(511.5, 511.5)] * 259 + [(2, 2)] * 259
+    energies = [FOOD_ENERGY if index % 3 else 0 for index in range(259)] * 2 + [0] * 259
+    # Exercise the final lane even though its neighboring lower slots are empty.
+    energies[258] = energies[517] = FOOD_ENERGY
+    write_food(sim, food_positions, energies)
+
+    def rebuild():
+        sim.food_credits.copy_from_numpy(
+            np.full(sim.num_worlds * sim.creature_capacity, 123, dtype=np.uint32)
+        )
+        encoder = app.device.create_command_encoder()
+        sim._update_grid(encoder)
+        sim._update_food_grid(encoder)
+        app.device.submit_command_buffer(encoder.finish())
+
+    rebuild()
+    expected_creatures = [
+        {(0, 0): {index for index in range(257) if alive[index]}},
+        {(GRID_SIZE - 1, GRID_SIZE - 1): {index for index in range(257, 514) if alive[index]}},
+        {},
+    ]
+    expected_food = [
+        {(0, 0): {index for index in range(259) if energies[index]}},
+        {(GRID_SIZE - 1, GRID_SIZE - 1): {index for index in range(259, 518) if energies[index]}},
+        {},
+    ]
+    assert grid_contents(sim) == expected_creatures
+    assert grid_membership(sim.food_grid_heads.to_numpy(), sim.food_grid_next.to_numpy()) == (
+        expected_food
+    )
+    worlds = cursor_for(sim, "worlds")
+    assert [worlds[i]["max_radius"].read() for i in range(3)] == [12, 7, 0]
+
+    # Clear a maximum, shrink another, and reuse dead slots in different cells.
+    creatures = cursor_for(sim, "creatures")
+    creatures[256]["alive"] = False
+    creatures[513]["radii"] = spy.float2(0.5, 0.315)
+    creatures[0]["alive"] = True
+    creatures[0]["position"] = spy.float2(8, 8)
+    creatures[514]["alive"] = True
+    creatures[514]["radii"] = spy.float2(2, 1)
+    creatures.apply()
+    food = cursor_for(sim, "food")
+    food[258]["energy"] = 0
+    food[0]["energy"] = FOOD_ENERGY
+    food[0]["position"] = spy.float2(8, 8)
+    food.apply()
+    rebuild()
+    expected_creatures[0][(0, 0)].remove(256)
+    expected_creatures[0][(2, 2)] = {0}
+    expected_creatures[2][(0, 0)] = {514}
+    expected_food[0][(0, 0)].remove(258)
+    expected_food[0][(2, 2)] = {0}
+    assert grid_contents(sim) == expected_creatures
+    assert grid_membership(sim.food_grid_heads.to_numpy(), sim.food_grid_next.to_numpy()) == (
+        expected_food
+    )
+    worlds = cursor_for(sim, "worlds")
+    assert [worlds[i]["max_radius"].read() for i in range(3)] == [0.5, 0.5, 2]
+    assert sim.grid_next.to_numpy().view(np.int32).reshape(-1)[256] == -1
+    assert sim.food_grid_next.to_numpy().view(np.int32).reshape(-1)[258] == -1
+    np.testing.assert_array_equal(sim.food_credits.to_numpy().view(np.uint32), 0)
+
+    creatures = cursor_for(sim, "creatures")
+    creatures[514]["alive"] = False
+    creatures.apply()
+    rebuild()
+    assert grid_contents(sim)[2] == {}
+    assert cursor_for(sim, "worlds")[2]["max_radius"].read() == 0
+
+
 def test_contested_food_has_one_eater_and_is_not_transferred_again(app):
     sim = Sim(
         app.device,
@@ -154,11 +258,124 @@ def test_contested_food_has_one_eater_and_is_not_transferred_again(app):
         gain = energies[world] - INITIAL_ENERGY
         assert np.count_nonzero(gain) == 1
         assert int(gain.sum()) == amount
+    totals = sim.food_energy_totals.to_numpy().view(np.uint64).reshape(2, 3)
+    np.testing.assert_array_equal(totals, [[4321, 0, 0], [7654, 0, 0]])
     np.testing.assert_array_equal(food_records(sim)["energy"], 0)
     worlds = cursor_for(sim, "worlds")
     assert [worlds[i]["num_food"].read() for i in range(2)] == [0, 0]
     sim.update()
     np.testing.assert_array_equal(creature_energies(sim), energies - 1)
+    np.testing.assert_array_equal(
+        sim.food_energy_totals.to_numpy().view(np.uint64).reshape(2, 3), totals
+    )
+
+
+def test_sparse_contact_queues_are_unique_bounded_and_order_independent_across_worlds(app):
+    sim = Sim(
+        app.device,
+        num_worlds=3,
+        creatures_per_world=65,
+        creature_capacity=65,
+        seed=37,
+        food_capacity=67,
+        initial_food=67,
+        target_food=67,
+        food_per_second=0,
+    )
+    # More than one workgroup contests each piece across the corner. One world
+    # has the same food layout but no touching creatures and must stay empty.
+    positions = [(0.1, 0.1)] * 65 + [(511.9, 511.9)] * 65 + [(250, 250)] * 65
+    food_positions = ([(511.9, 0.1), (0.1, 511.9), (511.9, 511.9)] * 22 + [(0.1, 0.1)]) * 3
+    food_energy = [17 + index for index in range(201)]
+    for world in range(3):
+        food_energy[world * 67 + 64] = 0
+        food_positions[world * 67 + 65] = (200, 200)
+
+    def prepare():
+        write_creatures(sim, positions)
+        write_food(sim, food_positions, food_energy)
+        detect_contacts(sim)
+        queues = contact_queues(sim)
+        for world in range(2):
+            expected = {world * 67 + local for local in range(67) if local not in (64, 65)}
+            assert set(map(int, queues[world])) == expected
+        assert len(queues[2]) == 0
+        return queues
+
+    prepare()
+    resolve_contacts(sim)
+    first = creature_energies(sim)
+    for world in range(2):
+        expected = sum(food_energy[world * 67 + local] for local in range(67) if local != 65)
+        assert sum(map(int, first[world])) == 65 * INITIAL_ENERGY + expected
+    np.testing.assert_array_equal(first[2], INITIAL_ENERGY)
+
+    # Append order is deliberately changed without changing the selected
+    # contenders: scheduling must not affect their credited energy.
+    queues = prepare()
+    reordered = sim.food_contact_queue.to_numpy().view(np.uint32).reshape(3, 67).copy()
+    for world, queue in enumerate(queues):
+        reordered[world, : len(queue)] = queue[::-1]
+    sim.food_contact_queue.copy_from_numpy(reordered)
+    resolve_contacts(sim)
+    np.testing.assert_array_equal(creature_energies(sim), first)
+
+
+@pytest.mark.parametrize("invalidated", ["dead", "reused", "food_consumed"])
+def test_resolution_revalidates_queued_participants_before_transferring_food(app, invalidated):
+    sim = Sim(
+        app.device,
+        num_worlds=1,
+        creatures_per_world=1,
+        creature_capacity=1,
+        food_capacity=1,
+        initial_food=1,
+        target_food=1,
+        food_per_second=0,
+    )
+    write_creatures(sim, [(20, 20)])
+    write_food(sim, [(20, 20)])
+    detect_contacts(sim)
+    assert contact_queues(sim)[0].tolist() == [0]
+
+    if invalidated == "food_consumed":
+        write_food(sim, [(20, 20)], [0])
+    else:
+        creatures = cursor_for(sim, "creatures")
+        if invalidated == "dead":
+            creatures[0]["alive"] = False
+        else:
+            creatures[0]["guid"] = creatures[0]["guid"].read() + 1000
+        creatures.apply()
+    resolve_contacts(sim)
+
+    assert int(creature_energies(sim)[0, 0]) == INITIAL_ENERGY
+    np.testing.assert_array_equal(sim.food_credits.to_numpy().view(np.uint32), 0)
+    np.testing.assert_array_equal(sim.food_energy_totals.to_numpy().view(np.uint64), 0)
+    expected_food = 0 if invalidated == "food_consumed" else FOOD_ENERGY
+    assert int(food_records(sim)["energy"][0, 0]) == expected_food
+    assert cursor_for(sim, "worlds")[0]["num_food"].read() == (expected_food > 0)
+
+
+def test_large_wrapped_stencil_enqueues_each_food_once(app):
+    sim = Sim(
+        app.device,
+        num_worlds=1,
+        creatures_per_world=1,
+        creature_capacity=1,
+        food_capacity=4,
+        initial_food=4,
+        target_food=4,
+        food_per_second=0,
+    )
+    # The radius covers the entire torus and requires all 128 x 128 cells.
+    write_creatures(sim, [(0.1, 0.1)], radii=(600, 1))
+    write_food(sim, [(0.1, 0.1), (511.9, 511.9), (256, 256), (130, 410)])
+    detect_contacts(sim)
+    assert set(map(int, contact_queues(sim)[0])) == {0, 1, 2, 3}
+    resolve_contacts(sim)
+    assert int(creature_energies(sim)[0, 0]) == INITIAL_ENERGY + 4 * FOOD_ENERGY
+    np.testing.assert_array_equal(food_records(sim)["energy"], 0)
 
 
 def test_parallel_food_credits_conserve_energy_and_replay_with_large_creature_reserves(app):
@@ -180,6 +397,7 @@ def test_parallel_food_credits_conserve_energy_and_replay_with_large_creature_re
         write_creatures(sim, [(32, 32)] * 26, energy=starting_energy)
         write_food(sim, [(32, 32)] * 386, food_energy)
         sim.update()
+        assert [len(queue) for queue in contact_queues(sim)] == [193, 193]
         return creature_energies(sim), sim.food.to_numpy().copy()
 
     first, food = collect()
@@ -187,6 +405,9 @@ def test_parallel_food_credits_conserve_energy_and_replay_with_large_creature_re
         expected = 13 * starting_energy + sum(food_energy[world * 193 : (world + 1) * 193])
         assert sum(map(int, first[world])) == expected
         assert np.count_nonzero(first[world] > starting_energy) > 1
+        assert sim.food_energy_totals.to_numpy().view(np.uint64).reshape(2, 3)[world, 0] == (
+            expected - 13 * starting_energy
+        )
     np.testing.assert_array_equal(food_records(sim)["energy"], 0)
     assert sim.inspect(1, 12)["energy"] == int(first[1, 12])
 

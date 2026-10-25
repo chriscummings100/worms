@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import slangpy as spy
 
-from tests.gpu_helpers import fixed_brains
+from tests.gpu_helpers import fixed_brains, grid_membership
 from worms.app import App
 from worms.sim import (
     BRAIN_ACTIVATIONS,
@@ -16,6 +16,8 @@ from worms.sim import (
     INITIAL_ENERGY,
     SPEED_ENERGY_COST,
     TIME_STEP,
+    VISION_HISTORY,
+    VISION_SLOTS,
     WORLD_SIZE,
     Sim,
 )
@@ -26,6 +28,7 @@ pytestmark = pytest.mark.gpu
 @pytest.fixture(scope="module")
 def app():
     application = App(
+        debug_gpu=True,
         headless=True,
         benchmark=False,
         snapshot_dir=None,
@@ -38,7 +41,7 @@ def app():
     application.close()
 
 
-def make_sim(app, *, creatures=1, capacity=None, worlds=1, food=0, seed=37):
+def make_sim(app, *, creatures=1, capacity=None, worlds=1, food=0, seed=37, **settings):
     return Sim(
         app.device,
         num_worlds=worlds,
@@ -49,6 +52,7 @@ def make_sim(app, *, creatures=1, capacity=None, worlds=1, food=0, seed=37):
         target_food=food,
         food_per_second=0,
         seed=seed,
+        **settings,
     )
 
 
@@ -84,8 +88,8 @@ def parameters(sim):
 
 def assert_small_mutation(child, parent):
     delta = child - parent
-    # Fixed seeds should change a few parameters, keeping almost all inherited exactly.
-    assert 0 < np.count_nonzero(delta) < BRAIN_PARAMETERS * 0.05
+    # At the 10% default, fixed seeds should keep most parameters inherited exactly.
+    assert BRAIN_PARAMETERS * 0.05 < np.count_nonzero(delta) < BRAIN_PARAMETERS * 0.2
     assert np.isfinite(child).all()
     assert np.max(np.abs(delta)) < 0.12
 
@@ -166,10 +170,14 @@ def test_fractional_idle_cost_accumulates_and_death_is_recorded_once(app):
     assert not dead["alive"]
     assert dead["energy"] == dead["energy_remainder"] == 0
     assert dead["velocity"] == (0, 0)
-    assert sim.inspect_vision(0, 0) is None
+    # Detection used the live creature before costs killed it in resolution.
+    assert sim.inspect_vision(0, 0)["tick"] == 2
     np.testing.assert_array_equal(sim.brain_activations.to_numpy().view(np.float32), 0)
-    np.testing.assert_array_equal(sim.grid_heads.to_numpy().view(np.int32), -1)
+    assert grid_membership(sim.grid_heads.to_numpy(), sim.grid_next.to_numpy()) == [{(25, 25): {0}}]
     advance(sim, 4)
+    assert sim.inspect_vision(0, 0) is None
+    assert sim.inspect_vision(0, 0, age=4)["tick"] == 2
+    np.testing.assert_array_equal(sim.grid_heads.to_numpy().view(np.int32), -1)
     stats = sim.inspect_world(0)
     assert (stats["num_creatures"], stats["births"], stats["deaths"]) == (0, 0, 1)
 
@@ -217,33 +225,49 @@ def test_split_mutates_inherited_network_and_copies_body_with_fresh_identity_and
     sim.update()
     guids = set()
     for world in range(2):
-        parent, child, unused1, unused2 = population(sim, world)
-        assert parent["guid"] == parents[world]["guid"]
-        assert parent["energy"] == 500_001 and child["energy"] == 500_000
-        assert child["guid"] > sim.num_worlds * sim.creature_capacity
-        assert child["parent_guid"] == parent["guid"]
-        assert child["generation"] == 1 and child["birth_tick"] == 1
-        for field in ("radii", "color", "max_speed", "split_energy"):
-            assert child[field] == parent[field]
-        assert child["energy_remainder"] == 0
-        assert child["velocity"] == (0, 0)
-        delta = np.array(child["position"]) - parent["position"]
+        first, second, unused1, unused2 = population(sim, world)
+        assert first["guid"] != second["guid"]
+        assert first["energy"] == 500_001 and second["energy"] == 500_000
+        for child in (first, second):
+            assert child["guid"] > sim.num_worlds * sim.creature_capacity
+            assert child["guid"] != parents[world]["guid"]
+            assert child["parent_guid"] == parents[world]["guid"]
+            assert child["generation"] == 1 and child["birth_tick"] == 1
+            for field in ("radii", "color", "max_speed", "split_energy", "lineage"):
+                assert child[field] == parents[world][field]
+            assert child["energy_remainder"] == 0
+            assert child["velocity"] == (0, 0)
+            assert child["desired_action"] == 0 and child["desired_target"] == -1
+        delta = np.array(second["position"]) - first["position"]
         delta -= WORLD_SIZE * np.floor(delta / WORLD_SIZE + 0.5)
         assert np.linalg.norm(delta) == pytest.approx(1.25, abs=1e-4)
-        assert all(0 <= coordinate < WORLD_SIZE for coordinate in child["position"])
+        assert all(0 <= coordinate < WORLD_SIZE for coordinate in second["position"])
         assert not unused1["alive"] and not unused2["alive"]  # No cascade in its birth tick.
         offset = world * sim.creature_capacity
-        np.testing.assert_array_equal(parameters(sim)[offset], original[offset])
+        assert_small_mutation(parameters(sim)[offset], original[offset])
         assert_small_mutation(parameters(sim)[offset + 1], original[offset])
+        assert not np.array_equal(parameters(sim)[offset], parameters(sim)[offset + 1])
+        first_changes = parameters(sim)[offset] != original[offset]
+        second_changes = parameters(sim)[offset + 1] != original[offset]
+        # Each child retains original values that only its sibling changed:
+        # neither mutation pass inherited the other's already-mutated network.
+        assert np.any(first_changes & ~second_changes)
+        assert np.any(second_changes & ~first_changes)
         np.testing.assert_array_equal(
             parameters(sim)[offset + 2 : offset + 4], original[offset + 2 : offset + 4]
         )
-        assert sim.inspect_vision(world, 1)["tick"] == 1
-        assert sim.inspect_vision(world, 1, age=1) is None
-        assert sim.inspect_vision(world, 0, age=1)["tick"] == 0
+        for slot in (0, 1):
+            assert sim.inspect_vision(world, slot) is None
+            assert sim.inspect_vision(world, slot, age=1) is None
+        np.testing.assert_array_equal(
+            sim.brain_activations.to_numpy()
+            .view(np.float32)
+            .reshape(-1, BRAIN_ACTIVATIONS)[offset : offset + 2],
+            0,
+        )
         stats = sim.inspect_world(world)
         assert (stats["num_creatures"], stats["births"], stats["deaths"]) == (2, 1, 0)
-        guids.update((parent["guid"], child["guid"]))
+        guids.update((first["guid"], second["guid"]))
     assert len(guids) == 4
 
 
@@ -287,14 +311,19 @@ def test_split_turns_both_creatures_outwards_and_separates_them_across_world_sea
             expected_position = (center + sign * side * 0.625 * size) % WORLD_SIZE
             np.testing.assert_allclose(creature["position"], expected_position, atol=1e-4, rtol=0)
             assert all(0 <= coordinate < WORLD_SIZE for coordinate in creature["position"])
-        np.testing.assert_allclose(parent["velocity"], -side * speed, atol=1e-5, rtol=0)
+        assert parent["velocity"] == (0, 0)
         assert child["velocity"] == (0, 0)
         separation = np.asarray(child["position"]) - parent["position"]
         separation -= WORLD_SIZE * np.floor(separation / WORLD_SIZE + 0.5)
         np.testing.assert_allclose(separation, side * 1.25 * size, atol=1e-4, rtol=0)
         assert sim.inspect_world(world)["births"] == 1
 
-    # Restore straight-ahead policies to isolate geometry from the newborn's mutation.
+    # This geometry-only override gives both newborns a first observation before
+    # restoring their policies; ordinary updates leave both stationary next tick.
+    encoder = sim.device.create_command_encoder()
+    sim._update_grid(encoder)
+    sim._update_vision(encoder)
+    sim.device.submit_command_buffer(encoder.finish())
     fixed_brains(sim, steering=0, movement=1)
     sim.update()
     for world, (heading, size, _) in enumerate(cases):
@@ -333,13 +362,16 @@ def test_full_capacity_preserves_energy_then_reuses_a_slot_that_dies_that_tick(a
     assert child["alive"] and parent["alive"]
     assert child["guid"] != previous[0]["guid"]
     assert child["parent_guid"] == previous[1]["guid"]
-    assert parent["guid"] == previous[1]["guid"]
-    assert parent["birth_tick"] == previous[1]["birth_tick"]
+    assert parent["guid"] != previous[1]["guid"]
+    assert parent["guid"] != child["guid"]
+    assert parent["parent_guid"] == previous[1]["guid"]
+    assert parent["birth_tick"] == child["birth_tick"] == sim.tick
     assert parent["age_start_tick"] == child["age_start_tick"] == sim.tick
     assert child["energy"] == parent["energy"] == INITIAL_ENERGY
     stats = sim.inspect_world(0)
     assert (stats["num_creatures"], stats["births"], stats["deaths"]) == (2, 1, 1)
-    # Both the reused low slot and surviving high slot are present after rebuilding.
+    # The grid retains the two old slots until next tick, even though both slots
+    # now contain new occupants and both previous identities have retired.
     heads = sim.grid_heads.to_numpy().view(np.int32).reshape(-1)
     links = sim.grid_next.to_numpy().view(np.int32).reshape(-1)
     members = set()
@@ -359,24 +391,27 @@ def test_repeated_slot_reuse_clears_previous_lifetime_history_and_never_reuses_g
     advance(sim, 5)
     assert all(sim.inspect_vision(0, 0, age=age) is not None for age in range(6))
     guids = {sim.inspect(0, 0)["guid"], sim.inspect(0, 1)["guid"]}
-    original_parent_weights = parameters(sim)[1].copy()
     siblings = []
     for death_count in (1, 2):
+        source = sim.inspect(0, 1)
+        source_weights = parameters(sim)[1].copy()
         cursor = cursor_for(sim)
         cursor[0]["energy"] = 0
         cursor[1]["energy"] = 2 * INITIAL_ENERGY + 10
         cursor.apply()
         sim.update()
-        child = sim.inspect(0, 0)
-        assert child["guid"] not in guids
-        guids.add(child["guid"])
-        assert child["birth_tick"] == sim.tick
-        assert sim.inspect_vision(0, 0)["tick"] == sim.tick
-        assert all(sim.inspect_vision(0, 0, age=age) is None for age in range(1, sim.tick + 1))
-        assert sim.inspect_vision(0, 1, age=sim.tick)["tick"] == 0
+        for slot in (0, 1):
+            child = sim.inspect(0, slot)
+            assert child["guid"] not in guids
+            guids.add(child["guid"])
+            assert child["parent_guid"] == source["guid"]
+            assert child["generation"] == source["generation"] + 1
+            assert child["birth_tick"] == sim.tick
+            assert all(sim.inspect_vision(0, slot, age=age) is None for age in range(sim.tick + 1))
         weights = parameters(sim)
-        np.testing.assert_array_equal(weights[1], original_parent_weights)
-        assert_small_mutation(weights[0], original_parent_weights)
+        assert_small_mutation(weights[0], source_weights)
+        assert_small_mutation(weights[1], source_weights)
+        assert not np.array_equal(weights[0], weights[1])
         siblings.append(weights[0].copy())
         stats = sim.inspect_world(0)
         assert (stats["num_creatures"], stats["births"], stats["deaths"]) == (
@@ -394,27 +429,29 @@ def test_next_generation_inherits_its_parents_mutated_network(app):
     sim.update()
     first_child = sim.inspect(0, 1)
     first_child_weights = parameters(sim)[1].copy()
+    sibling_weights = parameters(sim)[0].copy()
     assert_small_mutation(first_child_weights, original)
 
     advance(sim, 5)
-    history = [sim.inspect_vision(0, 1, age=age) for age in range(6)]
+    history = [sim.inspect_vision(0, 1, age=age) for age in range(5)]
     assert all(frame is not None for frame in history)
+    assert sim.inspect_vision(0, 1, age=5) is None  # Birth preceded first sensing.
     stage(sim, 1, energy=2 * INITIAL_ENERGY + 10)
     sim.update()
-    renewed_parent = sim.inspect(0, 1)
-    grandchild = sim.inspect(0, 2)
+    first_grandchild = sim.inspect(0, 1)
+    second_grandchild = sim.inspect(0, 2)
     weights = parameters(sim)
-    assert grandchild["parent_guid"] == first_child["guid"]
-    assert grandchild["generation"] == 2
-    for field in ("guid", "parent_guid", "generation", "birth_tick"):
-        assert renewed_parent[field] == first_child[field]
-    assert renewed_parent["age_start_tick"] == grandchild["age_start_tick"] == sim.tick
-    for age, frame in enumerate(history):
-        assert sim.inspect_vision(0, 1, age=age + 1) == frame
-    assert sim.inspect_vision(0, 2, age=1) is None
-    np.testing.assert_array_equal(weights[0], original)
-    np.testing.assert_array_equal(weights[1], first_child_weights)
+    assert first_grandchild["guid"] != second_grandchild["guid"]
+    for slot, grandchild in ((1, first_grandchild), (2, second_grandchild)):
+        assert grandchild["guid"] != first_child["guid"]
+        assert grandchild["parent_guid"] == first_child["guid"]
+        assert grandchild["generation"] == 2
+        assert grandchild["birth_tick"] == grandchild["age_start_tick"] == sim.tick
+        assert all(sim.inspect_vision(0, slot, age=age) is None for age in range(sim.tick + 1))
+    np.testing.assert_array_equal(weights[0], sibling_weights)
+    assert_small_mutation(weights[1], first_child_weights)
     assert_small_mutation(weights[2], first_child_weights)
+    assert not np.array_equal(weights[1], weights[2])
 
 
 def test_mutation_depends_on_seed_and_world_but_not_unrelated_worlds_or_birth_tick(app):
@@ -470,3 +507,304 @@ def test_empty_population_can_keep_reserved_slots_without_spawning_spontaneously
         assert (stats["num_creatures"], stats["births"], stats["deaths"]) == (0, 0, 0)
     assert sim.brain_activations.to_numpy().view(np.float32).size == 10 * BRAIN_ACTIVATIONS
     np.testing.assert_array_equal(sim.brain_activations.to_numpy().view(np.float32), 0)
+
+
+def test_newborn_waits_for_its_first_observation_before_moving(app):
+    sim = make_sim(app, capacity=2)
+    sim.mutation_enabled = False
+    stage(sim, 0, energy=2 * INITIAL_ENERGY + 100, speed=6)
+    fixed_brains(sim, steering=0, movement=1)
+
+    sim.update()
+
+    birth_positions = [np.asarray(sim.inspect(0, slot)["position"]) for slot in (0, 1)]
+    for slot in (0, 1):
+        assert sim.inspect_vision(0, slot) is None
+        assert sim.inspect_brain(0, slot)["movement"] == 0
+    assert grid_membership(sim.grid_heads.to_numpy(), sim.grid_next.to_numpy()) == [{(25, 25): {0}}]
+
+    sim.update()
+
+    for slot in (0, 1):
+        np.testing.assert_array_equal(sim.inspect(0, slot)["position"], birth_positions[slot])
+        assert sim.inspect_vision(0, slot)["tick"] == 2
+        assert sim.inspect_vision(0, slot, age=1) is None
+        assert sim.inspect_brain(0, slot)["movement"] == 1
+    members = grid_membership(sim.grid_heads.to_numpy(), sim.grid_next.to_numpy())[0]
+    assert set().union(*members.values()) == {0, 1}
+
+    sim.update()
+
+    for slot, sign in ((0, -1), (1, 1)):
+        expected_position = birth_positions[slot] + np.array([0.0, sign * 6 * TIME_STEP])
+        np.testing.assert_allclose(sim.inspect(0, slot)["position"], expected_position, atol=1e-5)
+
+
+def test_sparse_lifecycle_preserves_priority_across_bitsets_and_worlds(app):
+    capacity = 67  # Partial final word, and both free/eligible slots cross bits 32 and 64.
+    sim = make_sim(app, creatures=capacity, capacity=capacity, worlds=2)
+    fixed_brains(sim, movement=0)
+    advance(sim, 2)
+    previous_weights = parameters(sim).copy()
+    count = sim.num_worlds * capacity
+    previous_frames = (
+        sim.vision_frames.to_numpy().view(np.int32).reshape(VISION_HISTORY, count, 4).copy()
+    )
+    previous_history = (
+        sim.vision_history.to_numpy()
+        .view(np.float32)
+        .reshape(VISION_HISTORY, count, VISION_SLOTS, 5)
+        .copy()
+    )
+    original = [population(sim, world) for world in range(sim.num_worlds)]
+
+    dead_slots = [list(range(0, 66, 2)), list(range(1, 66, 2))]
+    parent_slots = [
+        [index for index in range(capacity) if index not in dead] for dead in dead_slots
+    ]
+    creatures = cursor_for(sim)
+    for world in range(sim.num_worlds):
+        for local_index in range(capacity):
+            index = world * capacity + local_index
+            creatures[index]["radii"] = spy.float2(0.5, 0.315)
+            creatures[index]["velocity"] = spy.float2(0, 0)
+            creatures[index]["energy"] = (
+                0 if local_index in dead_slots[world] else 2 * INITIAL_ENERGY + 10
+            )
+            creatures[index]["split_energy"] = 2 * INITIAL_ENERGY
+            creatures[index]["energy_remainder"] = 0.0
+    creatures.apply()
+
+    # Exercise resolution directly: food is already settled and this isolates
+    # structural work from the cost of rendering/vision in a deliberately busy tick.
+    encoder = sim.device.create_command_encoder()
+    sim._update_lifecycle(encoder)
+    sim.device.submit_command_buffer(encoder.finish())
+    sim.tick += 1
+
+    weights = parameters(sim)
+    frames = sim.vision_frames.to_numpy().view(np.int32).reshape(VISION_HISTORY, count, 4)
+    history = (
+        sim.vision_history.to_numpy()
+        .view(np.float32)
+        .reshape(VISION_HISTORY, count, VISION_SLOTS, 5)
+    )
+    activations = (
+        sim.brain_activations.to_numpy().view(np.float32).reshape(count, BRAIN_ACTIVATIONS)
+    )
+    np.testing.assert_array_equal(
+        sim.lifecycle_counts.to_numpy().view(np.uint32).reshape(2, 3),
+        [[34, 33, 33], [34, 33, 33]],
+    )
+    for world in range(sim.num_worlds):
+        records = population(sim, world)
+        assert all(creature["alive"] for creature in records)
+        stats = sim.inspect_world(world)
+        assert (stats["num_creatures"], stats["births"], stats["deaths"]) == (67, 33, 33)
+        assert records[66]["guid"] == original[world][66]["guid"]
+        assert records[66]["age_start_tick"] == original[world][66]["age_start_tick"]
+        assert records[66]["energy"] == 2 * INITIAL_ENERGY + 10
+        blocked = world * capacity + 66
+        np.testing.assert_array_equal(weights[blocked], previous_weights[blocked])
+        np.testing.assert_array_equal(frames[:, blocked], previous_frames[:, blocked])
+        np.testing.assert_array_equal(history[:, blocked], previous_history[:, blocked])
+        for ordinal, (parent_slot, child_slot) in enumerate(
+            zip(parent_slots[world][:33], dead_slots[world], strict=True)
+        ):
+            parent, child = records[parent_slot], records[child_slot]
+            parent_index, child_index = (
+                world * capacity + parent_slot,
+                world * capacity + child_slot,
+            )
+            first_guid = count + 2 * ordinal * sim.num_worlds + world + 1
+            assert parent["guid"] == first_guid
+            assert child["guid"] == first_guid + sim.num_worlds
+            assert parent["energy"] == child["energy"] == INITIAL_ENERGY + 5
+            for newborn, newborn_index in ((parent, parent_index), (child, child_index)):
+                assert newborn["parent_guid"] == original[world][parent_slot]["guid"]
+                assert newborn["generation"] == original[world][parent_slot]["generation"] + 1
+                assert newborn["birth_tick"] == newborn["age_start_tick"] == 3
+                assert newborn["velocity"] == (0, 0)
+                assert_small_mutation(weights[newborn_index], previous_weights[parent_index])
+                np.testing.assert_array_equal(activations[newborn_index], 0)
+                np.testing.assert_array_equal(frames[:, newborn_index, :3], 0)
+                np.testing.assert_array_equal(frames[:, newborn_index, 3], -1)
+                np.testing.assert_array_equal(history[:, newborn_index, :, 0], -1)
+                np.testing.assert_array_equal(history[:, newborn_index, :, 1:], 0)
+            assert not np.array_equal(weights[parent_index], weights[child_index])
+
+    # Another full-capacity phase has eligible parents but zero births. Old birth
+    # records must not copy networks or clear history again when their count is zero.
+    weights[0, 0] += 1.0
+    sim.brain_weights.copy_from_numpy(weights)
+    marked_frames = sim.vision_frames.to_numpy().copy()
+    marked_frames.view(np.int32).reshape(VISION_HISTORY, count, 4)[3, 0, 3] = 3
+    sim.vision_frames.copy_from_numpy(marked_frames)
+    marked_history = sim.vision_history.to_numpy().copy()
+    marked_history.view(np.float32).reshape(VISION_HISTORY, count, VISION_SLOTS, 5)[3, 0, 0, 0] = (
+        7.0
+    )
+    sim.vision_history.copy_from_numpy(marked_history)
+    history_buffers = {
+        name: getattr(sim, name).to_numpy().copy() for name in ("vision_frames", "vision_history")
+    }
+    encoder = sim.device.create_command_encoder()
+    sim._update_lifecycle(encoder)
+    sim.device.submit_command_buffer(encoder.finish())
+    sim.tick += 1
+    np.testing.assert_array_equal(
+        sim.lifecycle_counts.to_numpy().view(np.uint32).reshape(2, 3),
+        [[1, 0, 0], [1, 0, 0]],
+    )
+    np.testing.assert_array_equal(parameters(sim), weights)
+    for name, before in history_buffers.items():
+        np.testing.assert_array_equal(getattr(sim, name).to_numpy(), before)
+
+
+def test_split_action_revalidates_identity_before_claiming_a_free_slot(app):
+    sim = make_sim(app, creatures=2, capacity=3)
+    for index in range(2):
+        stage(sim, index, energy=2 * INITIAL_ENERGY + 10)
+    original_parent = sim.inspect(0, 1)
+    encoder = sim.device.create_command_encoder()
+    sim._clear_lifecycle.dispatch(command_encoder=encoder)
+    sim._settle_lifecycle.dispatch(
+        command_encoder=encoder,
+        tick=sim.tick + 1,
+        food_age_start=sim.food_age_start,
+        food_age_fade=sim.food_age_fade,
+    )
+    sim.device.submit_command_buffer(encoder.finish())
+
+    # An earlier action replaced the first candidate after eligibility was
+    # queued. Its old action must not apply to the new occupant of the same slot.
+    creatures = cursor_for(sim)
+    creatures[0]["guid"] = 1_000_000
+    creatures.apply()
+    encoder = sim.device.create_command_encoder()
+    sim._resolve_lifecycle.dispatch(command_encoder=encoder, seed=sim.seed, tick=sim.tick + 1)
+    sim._initialize_newborns.dispatch(
+        command_encoder=encoder,
+        mutation_enabled=sim.mutation_enabled,
+        input_mutation_probability=sim.input_mutation_probability,
+        policy_mutation_probability=sim.policy_mutation_probability,
+    )
+    sim.device.submit_command_buffer(encoder.finish())
+    sim.tick += 1
+
+    replacement, parent, child = population(sim)
+    assert replacement["energy"] == 2 * INITIAL_ENERGY + 10
+    assert replacement["age_start_tick"] == 0
+    assert parent["guid"] != original_parent["guid"]
+    assert parent["guid"] != child["guid"]
+    assert parent["parent_guid"] == original_parent["guid"]
+    assert child["parent_guid"] == original_parent["guid"]
+    assert parent["energy"] == child["energy"] == INITIAL_ENERGY + 5
+    assert sim.inspect_world(0)["births"] == 1
+
+
+def test_policy_mutation_probability_changes_only_biases_and_output_parameters(app):
+    sim = make_sim(app, capacity=2)
+    assert sim.input_mutation_probability == 0.10
+    assert sim.policy_mutation_probability == 0.10
+    original = parameters(sim)[0].copy()
+    children = {}
+    for probability in (0.0, 0.10, 1.0):
+        sim.policy_mutation_probability = probability
+        sim.reset()
+        assert sim.policy_mutation_probability == probability
+        stage(sim, 0, energy=2 * INITIAL_ENERGY + 10)
+        sim.update()
+        weights = parameters(sim)
+        children[probability] = weights.copy()
+
+    # The same birth stream always mutates the same W1 inputs, independent of
+    # the new control. Zero disables only the remaining 50 policy parameters.
+    for child_index in (0, 1):
+        assert np.count_nonzero(children[0.0][child_index, :1024] != original[:1024]) > 0
+        for probability in (0.10, 1.0):
+            np.testing.assert_array_equal(
+                children[probability][child_index, :1024], children[0.0][child_index, :1024]
+            )
+        np.testing.assert_array_equal(children[0.0][child_index, 1024:], original[1024:])
+        assert np.all(children[1.0][child_index, 1024:] != original[1024:])
+        default_changed = children[0.10][child_index, 1024:] != original[1024:]
+        np.testing.assert_array_equal(
+            children[0.10][child_index, 1024:][default_changed],
+            children[1.0][child_index, 1024:][default_changed],
+        )
+        assert np.count_nonzero(default_changed) < 50
+
+
+def test_disabled_mutation_copies_all_parameters_even_with_full_policy_probability(app):
+    sim = make_sim(
+        app,
+        capacity=2,
+        mutation_enabled=False,
+        input_mutation_probability=1.0,
+        policy_mutation_probability=1.0,
+    )
+    stage(sim, 0, energy=2 * INITIAL_ENERGY + 10)
+    original = parameters(sim)[0].copy()
+    sim.update()
+    assert sim.inspect_world(0)["births"] == 1
+    np.testing.assert_array_equal(parameters(sim)[0], original)
+    np.testing.assert_array_equal(parameters(sim)[1], original)
+
+
+def test_mutation_probabilities_are_captured_per_birth_in_one_encoder(app):
+    first_split = make_sim(
+        app, capacity=3, input_mutation_probability=1.0, policy_mutation_probability=0.0
+    )
+    stage(first_split, 0, energy=8 * INITIAL_ENERGY)
+    original_guid = first_split.inspect(0, 0)["guid"]
+    first_split.update()
+    first_generation = parameters(first_split).copy()
+    splitting_child_guid = first_split.inspect(0, 0)["guid"]
+
+    sim = make_sim(app, capacity=3)
+    stage(sim, 0, energy=8 * INITIAL_ENERGY)
+    encoder = sim.device.create_command_encoder()
+    sim.input_mutation_probability = 1.0
+    sim.policy_mutation_probability = 0.0
+    sim.update(encoder)
+    sim.input_mutation_probability = 0.0
+    sim.policy_mutation_probability = 1.0
+    sim.update(encoder)
+    sim.device.submit_command_buffer(encoder.finish())
+
+    first_grandchild, sibling, second_grandchild = population(sim)
+    assert sibling["parent_guid"] == original_guid and sibling["birth_tick"] == 1
+    for child in (first_grandchild, second_grandchild):
+        assert child["parent_guid"] == splitting_child_guid
+        assert child["generation"] == 2 and child["birth_tick"] == 2
+    weights = parameters(sim)
+    np.testing.assert_array_equal(weights[1], first_generation[1])
+    for child_index in (0, 2):
+        np.testing.assert_array_equal(weights[child_index, :1024], first_generation[0, :1024])
+        assert np.all(weights[child_index, 1024:] != first_generation[0, 1024:])
+    assert not np.array_equal(weights[0], weights[2])
+    assert sim.inspect_world(0)["births"] == 2
+
+
+def test_input_and_policy_mutation_probabilities_control_independent_blocks(app):
+    sim = make_sim(app, capacity=2)
+    original = parameters(sim)[0].copy()
+    for input_probability, policy_probability in ((0.0, 1.0), (1.0, 0.0), (0.0, 0.0)):
+        sim.input_mutation_probability = input_probability
+        sim.policy_mutation_probability = policy_probability
+        sim.reset()
+        assert sim.input_mutation_probability == input_probability
+        assert sim.policy_mutation_probability == policy_probability
+        stage(sim, 0, energy=2 * INITIAL_ENERGY + 10)
+        sim.update()
+        for child in parameters(sim):
+            for block, probability in (
+                (slice(0, 1024), input_probability),
+                (slice(1024, None), policy_probability),
+            ):
+                if probability == 0.0:
+                    np.testing.assert_array_equal(child[block], original[block])
+                else:
+                    assert np.all(child[block] != original[block])
+        assert sim.inspect_world(0)["births"] == 1
